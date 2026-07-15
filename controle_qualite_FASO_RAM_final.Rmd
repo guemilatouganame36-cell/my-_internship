@@ -1,0 +1,1212 @@
+---
+title: "Contrôle de Qualité – Base de Données FASO RAM"
+subtitle: "Résistance aux antibiotiques à l'interface homme/animal/environnement – Burkina Faso"
+author: "GANAME Guemilatou"
+date: "`r format(Sys.time(), '%d %B %Y à %H:%M')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 9,
+  fig.height = 5
+)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PACKAGES
+# ══════════════════════════════════════════════════════════════════════════════
+pkgs <- c("readxl", "dplyr", "tidyr", "lubridate", "stringr",
+          "knitr", "kableExtra", "ggplot2", "openxlsx",
+          "janitor", "purrr")
+invisible(lapply(pkgs, function(p) {
+  if (!requireNamespace(p, quietly = TRUE))
+    install.packages(p, repos = "https://cloud.r-project.org")
+  library(p, character.only = TRUE)
+}))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PARAMÈTRES GLOBAUX
+# ══════════════════════════════════════════════════════════════════════════════
+FICHIER  <- "BDD_FASO_RAM_RESAISIE.xlsx"
+DATE_MIN <- as.Date("2023-01-01")
+DATE_MAX <- Sys.Date()
+AGE_MIN  <- 0
+AGE_MAX  <- 120
+ROUGE    <- "#C0392B"
+VERT     <- "#27AE60"
+ORANGE   <- "#E67E22"
+BLEU     <- "#2980B9"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CHARGEMENT DES DONNÉES
+# ══════════════════════════════════════════════════════════════════════════════
+main <- read_excel(FICHIER, sheet = "FASO_RAM_RESAISIE", guess_max = 2000)
+como <- read_excel(FICHIER, sheet = "Comorbidite")
+atb  <- read_excel(FICHIER, sheet = "ATB")
+med  <- read_excel(FICHIER, sheet = "medicament")
+
+main_clean <- main %>% clean_names()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# JOURNAL GLOBAL DES ANOMALIES
+# ══════════════════════════════════════════════════════════════════════════════
+# Structure enrichie :
+#   ID_anomalie | Feuille | Variable | Type_erreur | N_obs |
+#   Degre_impact | Details | IDs | Correction_proposee
+# ──────────────────────────────────────────────────────────────────────────────
+journal <- list()
+anomalie_id <- 0L   # compteur auto-incrémenté
+
+log_issue <- function(feuille,
+                      variable,
+                      type_erreur,
+                      n_obs,
+                      details         = "",
+                      ids             = NA,
+                      degre           = NULL,   # "Critique" | "Majeur" | "Mineur"
+                      correction      = "") {
+
+  anomalie_id <<- anomalie_id + 1L
+
+  # Degré automatique si non fourni
+  if (is.null(degre)) {
+    degre <- dplyr::case_when(
+      grepl("manquant|doublon|Doublon",      type_erreur, ignore.case = TRUE) & n_obs > 50 ~ "Critique",
+      grepl("manquant|doublon|Doublon",      type_erreur, ignore.case = TRUE) & n_obs > 0  ~ "Majeur",
+      grepl("aberrant|incohérence|Incohérence|hors plage|format", type_erreur, ignore.case = TRUE) ~ "Majeur",
+      grepl("inattendu|orphelin",            type_erreur, ignore.case = TRUE) ~ "Mineur",
+      n_obs == 0                                                               ~ "Aucun",
+      TRUE                                                                     ~ "Mineur"
+    )
+  }
+
+  journal[[length(journal) + 1]] <<- data.frame(
+    ID_anomalie         = sprintf("ANO-%03d", anomalie_id),
+    Feuille             = feuille,
+    Variable            = variable,
+    Type_erreur         = type_erreur,
+    N_obs               = n_obs,
+    Degre_impact        = degre,
+    Details             = details,
+    IDs                 = if (all(is.na(ids))) NA_character_
+                          else paste(head(ids, 20), collapse = ", "),
+    Correction_proposee = correction,
+    stringsAsFactors    = FALSE
+  )
+}
+
+flag_col <- function(n) if (n == 0) VERT else if (n <= 10) ORANGE else ROUGE
+```
+
+---
+
+# Vue d'ensemble de la base
+
+```{r vue_ensemble}
+resume <- tibble(
+  Feuille      = c("FASO_RAM_RESAISIE", "Comorbidite", "ATB", "medicament"),
+  Observations = c(nrow(main), nrow(como), nrow(atb), nrow(med)),
+  Variables    = c(ncol(main), ncol(como), ncol(atb), ncol(med))
+)
+
+kable(resume,
+      caption = "Dimensions des quatre feuilles de la base FASO RAM",
+      align = "lrr") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE) %>%
+  column_spec(1, bold = TRUE)
+```
+
+---
+
+# Feuille principale : FASO_RAM_RESAISIE {.tabset}
+
+## 1.1 Données manquantes
+
+```{r manquants_main}
+vars_cles <- c(
+  "P0.Initiale du prénom :",
+  "P1. Initiale du nom :",
+  "P4. Date d\u2019inclusion dans l\u2019\u00e9tude (jj/mm/aaaa)",
+  "P5. Date d\u2019hospitalisation dans le site d\u2019\u00e9tude (jj/mm/aaaa) :",
+  "P6. Sexe",
+  "P6.1. Date de naissance",
+  "P7. Age",
+  "P8. Niveau d\u2019Education",
+  "P9. Profession",
+  "P15. Avez-vous pris des antibiotiques au cours des 2 derni\u00e8res semaines ?",
+  "P22. Ville",
+  "P24. Cadre",
+  "P25. Type d\u2019habitat",
+  "P33. Quel type de toilettes utilisez vous ?",
+  "P34. Utilisez-vous du savon pour le lavage des mains apr\u00e8s \u00eatre all\u00e9 aux latrines ?",
+  "P35. Utilisez-vous du savon pour le lavage des mains avant de manger ?",
+  "P52. Avez vous des animaux?",
+  "P68. Pr\u00e9l\u00e8vement effectuer",
+  "P72. R\u00e9sultat culture"
+)
+vars_cles_exist <- vars_cles[vars_cles %in% names(main)]
+
+miss_main <- main %>%
+  select(all_of(vars_cles_exist)) %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "N_manquants") %>%
+  mutate(Pct = round(N_manquants / nrow(main) * 100, 1)) %>%
+  arrange(desc(N_manquants))
+
+miss_main %>% filter(N_manquants > 0) %>%
+  pwalk(~log_issue(
+    feuille    = "FASO_RAM_RESAISIE",
+    variable   = ..1,
+    type_erreur= "Valeur manquante",
+    n_obs      = ..2,
+    details    = paste0(..3, "% manquant"),
+    correction = "Compléter via le CRF papier ou contacter l'enquêteur responsable du site"
+  ))
+
+miss_main %>%
+  mutate(
+    Variable = str_trunc(Variable, 55),
+    Statut   = case_when(
+      N_manquants == 0 ~ "\u2714 Complet",
+      Pct <= 5         ~ "\u26a0 < 5 %",
+      Pct <= 20        ~ "\u26a0 5\u201320 %",
+      TRUE             ~ "\u2716 > 20 %"
+    )
+  ) %>%
+  kable(caption = "Données manquantes \u2013 variables cl\u00e9s (feuille principale)",
+        col.names = c("Variable", "N manquants", "% manquant", "Statut"),
+        align = "lrrl") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE) %>%
+  row_spec(which(miss_main$N_manquants > 0 & miss_main$Pct > 20),
+           color = "white", background = ROUGE) %>%
+  row_spec(which(miss_main$N_manquants > 0 & miss_main$Pct <= 20),
+           background = "#FFF3CD")
+```
+
+```{r plot_manquants, fig.height=6}
+miss_plot <- miss_main %>%
+  filter(N_manquants > 0) %>%
+  mutate(Variable = str_trunc(Variable, 45),
+         Couleur  = case_when(Pct > 20 ~ ROUGE, Pct > 5 ~ ORANGE, TRUE ~ VERT))
+
+if (nrow(miss_plot) > 0) {
+  ggplot(miss_plot, aes(x = reorder(Variable, Pct), y = Pct, fill = Couleur)) +
+    geom_col() +
+    scale_fill_identity() +
+    coord_flip() +
+    labs(title = "Taux de données manquantes \u2013 variables cl\u00e9s",
+         x = NULL, y = "% manquant") +
+    theme_minimal(base_size = 11) +
+    geom_hline(yintercept = c(5, 20), linetype = "dashed", colour = "grey50")
+} else {
+  cat("Aucune donnée manquante détectée sur les variables clés.")
+}
+```
+
+## 1.2 Doublons
+
+```{r doublons}
+# ── Doublons sur Identifiant participant ──────────────────────────────────────
+dup_id <- main %>%
+  group_by(`Identifiant participant`) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+n_dup    <- nrow(dup_id)
+ids_dup  <- unique(dup_id$`Identifiant participant`)
+
+if (n_dup > 0)
+  log_issue(
+    feuille    = "FASO_RAM_RESAISIE",
+    variable   = "Identifiant participant",
+    type_erreur= "Doublon",
+    n_obs      = n_dup,
+    details    = paste(length(ids_dup), "identifiant(s) concerné(s)"),
+    ids        = ids_dup,
+    degre      = "Critique",
+    correction = "Identifier la ligne en doublon (comparer toutes les variables), conserver la saisie la plus complète et supprimer l'autre ; si deux patients distincts, corriger l'identifiant erroné"
+  )
+
+cat(sprintf("Lignes dupliquées (même Identifiant participant) : %d\n", n_dup))
+
+if (n_dup > 0) {
+  dup_id %>%
+    select(`Identifiant participant`,
+           'P4. Date d\u2019inclusion dans l\u2019\u00e9tude (jj/mm/aaaa)',
+           `P6. Sexe`, `P7. Age`) %>%
+    arrange(`Identifiant participant`) %>%
+    kable(caption = "Lignes dupliquées") %>%
+    kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+}
+
+# ── Doublons UUID ─────────────────────────────────────────────────────────────
+dup_uuid <- main %>%
+  filter(duplicated(`_uuid`) | duplicated(`_uuid`, fromLast = TRUE))
+cat(sprintf("Doublons sur _uuid : %d\n", nrow(dup_uuid)))
+
+if (nrow(dup_uuid) > 0)
+  log_issue(
+    feuille    = "FASO_RAM_RESAISIE",
+    variable   = "_uuid",
+    type_erreur= "Doublon UUID",
+    n_obs      = nrow(dup_uuid),
+    degre      = "Critique",
+    correction = "Vérifier dans le système de collecte (KoBoToolbox) si la soumission a été envoyée deux fois ; supprimer la soumission dupliquée"
+  )
+```
+
+## 1.3 Cohérence des dates
+
+```{r dates}
+d_inc  <- main[["P4. Date d\u2019inclusion dans l\u2019\u00e9tude (jj/mm/aaaa)"]]
+d_hosp <- main[["P5. Date d\u2019hospitalisation dans le site d\u2019\u00e9tude (jj/mm/aaaa) :"]]
+
+# Hors plage
+hors_plage <- main %>%
+  mutate(d_inc = .data[["P4. Date d\u2019inclusion dans l\u2019\u00e9tude (jj/mm/aaaa)"]]) %>%
+  filter(!is.na(d_inc) & (d_inc < DATE_MIN | d_inc > DATE_MAX))
+
+cat(sprintf("Dates d'inclusion hors plage [%s \u2013 %s] : %d\n",
+            DATE_MIN, DATE_MAX, nrow(hors_plage)))
+
+if (nrow(hors_plage) > 0)
+  log_issue(
+    feuille    = "FASO_RAM_RESAISIE",
+    variable   = "P4. Date d'inclusion",
+    type_erreur= "Date hors plage",
+    n_obs      = nrow(hors_plage),
+    details    = paste0("Hors [", DATE_MIN, " \u2013 ", DATE_MAX, "]"),
+    ids        = hors_plage$`Identifiant participant`,
+    correction = "Vérifier la date sur le CRF papier et corriger la saisie ; si la date est réelle, mettre à jour la borne DATE_MIN/DATE_MAX"
+  )
+
+# Hospitalisation avant inclusion
+incoh_hosp <- main %>%
+  filter(!is.na(d_inc) & !is.na(d_hosp) & d_hosp < d_inc)
+cat(sprintf("Hospitalisation AVANT inclusion : %d\n", nrow(incoh_hosp)))
+
+if (nrow(incoh_hosp) > 0)
+  log_issue(
+    feuille    = "FASO_RAM_RESAISIE",
+    variable   = "P5. Date hospitalisation",
+    type_erreur= "Incohérence temporelle",
+    n_obs      = nrow(incoh_hosp),
+    details    = "Date hospitalisation < date inclusion",
+    ids        = incoh_hosp$`Identifiant participant`,
+    correction = "Vérifier les deux dates sur le CRF papier ; si la date d'hospitalisation est postérieure à l'inclusion c'est une erreur de saisie à corriger"
+  )
+
+# Récap graphique
+main %>%
+  mutate(Annee = year(.data[["P4. Date d\u2019inclusion dans l\u2019\u00e9tude (jj/mm/aaaa)"]])) %>%
+  count(Annee) %>%
+  filter(!is.na(Annee)) %>%
+  ggplot(aes(x = factor(Annee), y = n, fill = factor(Annee))) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Distribution des inclusions par année",
+       x = "Année", y = "N inclusions") +
+  theme_minimal()
+```
+
+## 1.4 Valeurs aberrantes – Age
+
+```{r age}
+age_col  <- main[["P7. Age"]]
+age_stat <- summary(age_col)
+cat("Statistiques de l'âge :\n")
+print(age_stat)
+
+# Âges aberrants
+age_ab <- main %>%
+  filter(!is.na(`P7. Age`) & (`P7. Age` < AGE_MIN | `P7. Age` > AGE_MAX))
+cat(sprintf("\nÂges hors plage [%d \u2013 %d] : %d observation(s)\n",
+            AGE_MIN, AGE_MAX, nrow(age_ab)))
+
+if (nrow(age_ab) > 0) {
+  log_issue(
+    feuille    = "FASO_RAM_RESAISIE",
+    variable   = "P7. Age",
+    type_erreur= "Valeur aberrante",
+    n_obs      = nrow(age_ab),
+    details    = paste("Ages:", paste(age_ab$`P7. Age`, collapse = ", ")),
+    ids        = age_ab$`Identifiant participant`,
+    correction = "Recalculer l'âge depuis la date de naissance (P6.1) ; si incohérent, vérifier le CRF papier et corriger"
+  )
+  age_ab %>%
+    select(`Identifiant participant`, `P7. Age`, `P6.1. Date de naissance`) %>%
+    kable(caption = "\u00c2ges aberrants") %>%
+    kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+}
+
+ggplot(main %>% filter(!is.na(`P7. Age`) & `P7. Age` <= AGE_MAX),
+       aes(x = `P7. Age`)) +
+  geom_histogram(binwidth = 5, fill = BLEU, colour = "white") +
+  labs(title = "Distribution de l'\u00e2ge (valeurs \u2264 120 ans)",
+       x = "\u00c2ge (ann\u00e9es)", y = "Effectif") +
+  theme_minimal()
+```
+
+## 1.5 Contrôle Sexe
+
+```{r sexe}
+# ── Valeurs attendues strictes selon le formulaire CRF : Homme / Femme ────────
+val_att_sexe <- c("Homme", "Femme")
+
+sexe_tab <- main %>%
+  count(`P6. Sexe`, name = "N") %>%
+  mutate(
+    Pct    = round(N / sum(N) * 100, 1),
+    Statut = if_else(`P6. Sexe` %in% val_att_sexe | is.na(`P6. Sexe`),
+                     "\u2714 Attendu", "\u2716 Inattendu")
+  )
+
+# Lignes avec valeur inattendue (ni "Homme", ni "Femme", ni NA)
+sexe_invalide <- main %>%
+  filter(!is.na(`P6. Sexe`) & !`P6. Sexe` %in% val_att_sexe)
+
+# Lignes avec valeur manquante
+sexe_manquant <- main %>%
+  filter(is.na(`P6. Sexe`))
+
+if (nrow(sexe_invalide) > 0)
+  log_issue(
+    feuille    = "FASO_RAM_RESAISIE",
+    variable   = "P6. Sexe",
+    type_erreur= "Valeur inattendue",
+    n_obs      = nrow(sexe_invalide),
+    details    = paste("Valeurs observées :", paste(unique(sexe_invalide$`P6. Sexe`), collapse = ", "),
+                       "| Valeurs attendues : Homme / Femme"),
+    ids        = sexe_invalide$`Identifiant participant`,
+    degre      = "Majeur",
+    correction = paste0(
+      "Remplacer les valeurs erronées par 'Homme' ou 'Femme' après vérification sur le CRF papier.",
+      " Corrections suggérées : 'Masculin' \u2192 'Homme', 'F\u00e9minin' \u2192 'Femme',",
+      " 'M' \u2192 'Homme', 'F' \u2192 'Femme'."
+    )
+  )
+
+if (nrow(sexe_manquant) > 0)
+  log_issue(
+    feuille    = "FASO_RAM_RESAISIE",
+    variable   = "P6. Sexe",
+    type_erreur= "Valeur manquante",
+    n_obs      = nrow(sexe_manquant),
+    details    = "Sexe non renseigné",
+    ids        = sexe_manquant$`Identifiant participant`,
+    correction = "Compléter depuis le CRF papier ou contacter l'enquêteur du site concerné"
+  )
+
+# Tableau récapitulatif
+sexe_tab %>%
+  kable(caption = "R\u00e9partition par sexe (valeurs attendues : Homme / Femme)",
+        col.names = c("Sexe", "N", "%", "Statut")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  row_spec(which(!sexe_tab$`P6. Sexe` %in% val_att_sexe & !is.na(sexe_tab$`P6. Sexe`)),
+           color = "white", background = ROUGE)
+
+# Détail des valeurs invalides
+if (nrow(sexe_invalide) > 0) {
+  cat("\n\nDétail des enregistrements avec valeur de sexe inattendue :\n")
+  sexe_invalide %>%
+    select(`Identifiant participant`, `P6. Sexe`, `P7. Age`) %>%
+    kable(caption = "Valeurs de sexe invalides") %>%
+    kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+    row_spec(seq_len(nrow(sexe_invalide)), color = "white", background = ROUGE)
+}
+
+# Graphique
+ggplot(sexe_tab %>% filter(!is.na(`P6. Sexe`)),
+       aes(x = `P6. Sexe`, y = N,
+           fill = if_else(`P6. Sexe` %in% val_att_sexe, "Attendu", "Inattendu"))) +
+  geom_col(show.legend = TRUE) +
+  scale_fill_manual(values = c("Attendu" = BLEU, "Inattendu" = ROUGE),
+                    name = "Statut") +
+  geom_text(aes(label = paste0(N, " (", Pct, "%)")), vjust = -0.4) +
+  labs(title = "R\u00e9partition par sexe",
+       subtitle = "Valeurs attendues selon le CRF : Homme / Femme",
+       x = NULL, y = "Effectif") +
+  theme_minimal()
+```
+
+## 1.6 Confrontation Identifiant Participant vs Identifiant Inclusion
+
+```{r confrontation_identifiants}
+# ══════════════════════════════════════════════════════════════════════════════
+# CONTRÔLE 1 : Concordance entre les deux colonnes identifiant
+# ══════════════════════════════════════════════════════════════════════════════
+
+col_part  <- "Identifiant participant"
+col_incl  <- "Identifiant inclusion"
+
+# Vérifier que les deux colonnes existent
+cols_presentes <- intersect(c(col_part, col_incl), names(main))
+
+if (length(cols_presentes) < 2) {
+  cat(sprintf(
+    "\u26a0 Colonne(s) absente(s) de la feuille : %s\n",
+    paste(setdiff(c(col_part, col_incl), cols_presentes), collapse = ", ")
+  ))
+} else {
+
+  # Comparer après homogénéisation (trim + lowercase)
+  concordance <- main %>%
+    mutate(
+      id_part_std = str_trim(as.character(.data[[col_part]])),
+      id_incl_std = str_trim(as.character(.data[[col_incl]])),
+      Concordant  = case_when(
+        is.na(id_part_std) | is.na(id_incl_std) ~ "NA dans l'un des deux",
+        id_part_std == id_incl_std               ~ "Concordant",
+        TRUE                                     ~ "Discordant"
+      )
+    )
+
+  discordants <- concordance %>% filter(Concordant == "Discordant")
+  na_ids      <- concordance %>% filter(Concordant == "NA dans l'un des deux")
+
+  # Résumé tabulaire
+  concordance %>%
+    count(Concordant, name = "N") %>%
+    mutate(Pct = round(N / sum(N) * 100, 1)) %>%
+    kable(caption = "Concordance Identifiant participant vs Identifiant inclusion",
+          col.names = c("Statut", "N", "%")) %>%
+    kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+    row_spec(which(concordance %>% count(Concordant) %>% pull(Concordant) == "Discordant"),
+             color = "white", background = ROUGE)
+
+  cat(sprintf("\nPaires discordantes         : %d\n", nrow(discordants)))
+  cat(sprintf("NA dans l'un ou l'autre    : %d\n",   nrow(na_ids)))
+
+  # Log discordances
+  if (nrow(discordants) > 0) {
+    log_issue(
+      feuille    = "FASO_RAM_RESAISIE",
+      variable   = "Identifiant participant / Identifiant inclusion",
+      type_erreur= "Discordance entre identifiants",
+      n_obs      = nrow(discordants),
+      details    = paste0(
+        "Les deux colonnes sont différentes sur ", nrow(discordants), " ligne(s). ",
+        "Exemples : ",
+        paste(head(paste0(discordants[[col_part]], " \u2260 ", discordants[[col_incl]]), 5),
+              collapse = " | ")
+      ),
+      ids        = discordants[[col_part]],
+      degre      = "Critique",
+      correction = paste0(
+        "Vérifier sur le CRF papier lequel des deux identifiants est le bon. ",
+        "En principe 'Identifiant participant' (saisi sur le terrain) fait foi ; ",
+        "corriger 'Identifiant inclusion' en conséquence, ou inversement selon la procédure d'\u00e9tude."
+      )
+    )
+
+    discordants %>%
+      select(all_of(col_part), all_of(col_incl),
+             `P6. Sexe`, `P7. Age`,
+             'P4. Date d\u2019inclusion dans l\u2019\u00e9tude (jj/mm/aaaa)') %>%
+      kable(caption = "Lignes avec identifiants discordants") %>%
+      kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+      row_spec(seq_len(nrow(discordants)), color = "white", background = ROUGE)
+  }
+
+  # Log NA
+  if (nrow(na_ids) > 0) {
+    log_issue(
+      feuille    = "FASO_RAM_RESAISIE",
+      variable   = "Identifiant participant / Identifiant inclusion",
+      type_erreur= "NA dans l'un des identifiants",
+      n_obs      = nrow(na_ids),
+      details    = paste0(nrow(na_ids), " ligne(s) avec au moins un identifiant manquant"),
+      ids        = na_ids[[col_part]],
+      degre      = "Critique",
+      correction = "Compléter l'identifiant manquant depuis le registre de l'\u00e9tude ou le CRF papier"
+    )
+  }
+}
+```
+
+## 1.7 Format de l'Identifiant Participant
+
+```{r format_identifiant}
+# ══════════════════════════════════════════════════════════════════════════════
+# CONTRÔLE 2 : Homogénéité du format de l'Identifiant participant
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Stratégie :
+#   1. Détecter le format dominant (ex. "numérique pur", "4 chiffres", etc.)
+#   2. Signaler toute valeur qui ne suit pas ce format dominant
+# ══════════════════════════════════════════════════════════════════════════════
+
+ids_raw <- main[[col_part]]
+
+# Classifier chaque identifiant
+classer_format <- function(x) {
+  x <- as.character(x)
+  dplyr::case_when(
+    is.na(x) | x == "NA"                    ~ "Manquant",
+    grepl("^[0-9]+$", x)                    ~ paste0("Numérique (", nchar(x), " chiffre(s))"),
+    grepl("^[A-Z]{2}[0-9]+$", x)            ~ "Alphanumérique (XX + chiffres)",
+    grepl("^[0-9]+[A-Za-z]+$", x)           ~ "Numérique + lettres",
+    grepl("^[A-Za-z]+$", x)                 ~ "Lettres uniquement",
+    grepl("\\s", x)                         ~ "Contient des espaces",
+    TRUE                                     ~ "Format autre"
+  )
+}
+
+format_ids <- tibble(
+  ID     = ids_raw,
+  Format = sapply(ids_raw, classer_format)
+)
+
+format_resume <- format_ids %>%
+  count(Format, name = "N") %>%
+  mutate(Pct = round(N / sum(N) * 100, 1)) %>%
+  arrange(desc(N))
+
+kable(format_resume,
+      caption = "Distribution des formats d'Identifiant participant",
+      col.names = c("Format détecté", "N", "%")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+
+# Format dominant
+format_dominant <- format_resume$Format[1]
+cat(sprintf("\nFormat dominant : %s (%d observations, %.1f%%)\n",
+            format_dominant, format_resume$N[1], format_resume$Pct[1]))
+
+# Lignes hors format dominant
+formats_minoritaires <- format_ids %>%
+  filter(Format != format_dominant & Format != "Manquant")
+
+if (nrow(formats_minoritaires) > 0) {
+  cat(sprintf("Identifiants avec format différent du format dominant : %d\n",
+              nrow(formats_minoritaires)))
+
+  log_issue(
+    feuille    = "FASO_RAM_RESAISIE",
+    variable   = "Identifiant participant",
+    type_erreur= "Format d'identifiant hétérogène",
+    n_obs      = nrow(formats_minoritaires),
+    details    = paste0(
+      "Format dominant : '", format_dominant, "'. ",
+      "Autres formats détectés : ",
+      paste(
+        unique(paste0(formats_minoritaires$Format, " (ex. : ", formats_minoritaires$ID, ")")),
+        collapse = " | "
+      )
+    ),
+    ids        = formats_minoritaires$ID,
+    degre      = "Majeur",
+    correction = paste0(
+      "Standardiser tous les identifiants au format dominant '", format_dominant, "'. ",
+      "Vérifier chaque cas avec le registre d'\u00e9tude et corriger la saisie ",
+      "(ex. : supprimer les espaces, compléter avec des zéros non significatifs, ",
+      "retirer les préfixes/suffixes alphanumériques si non prévus par le protocole)."
+    )
+  )
+
+  main %>%
+    filter(.data[[col_part]] %in% formats_minoritaires$ID) %>%
+    select(all_of(col_part), `P6. Sexe`, `P7. Age`,
+          `P4. Date d’inclusion dans l’étude (jj/mm/aaaa)`) %>%
+    left_join(formats_minoritaires, by = c("Identifiant participant" = "ID")) %>%
+    kable(caption = "Identifiants hors format dominant") %>%
+    kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+    row_spec(seq_len(nrow(formats_minoritaires)), background = "#FFF3CD")
+
+} else {
+  cat("\u2714 Tous les identifiants respectent le format dominant.\n")
+}
+
+# Graphique
+ggplot(format_resume, aes(x = reorder(Format, N), y = N,
+                          fill = Format == format_dominant)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_manual(values = c("TRUE" = VERT, "FALSE" = ROUGE)) +
+  coord_flip() +
+  labs(title = "Distribution des formats d'Identifiant participant",
+       subtitle = paste0("Format attendu (dominant) : ", format_dominant),
+       x = NULL, y = "Effectif") +
+  theme_minimal()
+```
+
+## 1.8 Incohérences logiques
+
+```{r incoherences}
+incoherences <- list()
+
+# ATB Oui mais pas de médicament dans feuille medicament
+atb_oui_ids <- main %>%
+  filter('P15. Avez-vous pris des antibiotiques au cours des 2 derni\u00e8res semaines ?' == "Oui") %>%
+  pull(`_index`)
+med_parents     <- unique(med$`_parent_index`)
+atb_sans_med    <- setdiff(atb_oui_ids, med_parents)
+
+if (length(atb_sans_med) > 0)
+  log_issue(
+    feuille    = "FASO_RAM_RESAISIE / medicament",
+    variable   = "P15 \u2013 ATB 2 semaines",
+    type_erreur= "Incohérence : Oui mais aucun médicament renseigné",
+    n_obs      = length(atb_sans_med),
+    ids        = atb_sans_med,
+    correction = "Compléter la feuille 'medicament' pour ces patients ou vérifier si la réponse P15 est erronée"
+  )
+incoherences[["ATB oui sans médicament"]] <- length(atb_sans_med)
+
+# Comorbidité déclarée mais aucune ligne dans Comorbidite
+comorb_oui_ids <- main %>%
+  filter('P10. Avez-vous eu des ant\u00e9c\u00e9dents m\u00e9dicaux ou des comorbidités dans les 6 derniers mois ?' == "Oui") %>%
+  pull(`_index`)
+como_parents        <- unique(como$`_parent_index`)
+comorb_sans_detail  <- setdiff(comorb_oui_ids, como_parents)
+
+if (length(comorb_sans_detail) > 0)
+  log_issue(
+    feuille    = "FASO_RAM_RESAISIE / Comorbidite",
+    variable   = "P10 \u2013 Comorbidité",
+    type_erreur= "Incohérence : Oui mais aucune comorbidité renseignée",
+    n_obs      = length(comorb_sans_detail),
+    ids        = comorb_sans_detail,
+    correction = "Compléter la feuille 'Comorbidite' pour ces patients, ou corriger la réponse P10 à 'Non'"
+  )
+incoherences[["Comorbidité oui sans détail"]] <- length(comorb_sans_detail)
+
+# Culture positive mais aucun micro-organisme renseigné
+cult_pos <- main %>%
+  filter('P72. R\u00e9sultat culture' == "Positif" &
+           is.na('P74. Nombre de micro-organismes isol\u00e9s'))
+
+if (nrow(cult_pos) > 0)
+  log_issue(
+    feuille    = "FASO_RAM_RESAISIE",
+    variable   = "P72/P74 Culture",
+    type_erreur= "Incohérence : Culture positive sans micro-organisme",
+    n_obs      = nrow(cult_pos),
+    ids        = cult_pos$`Identifiant participant`,
+    correction = "Compléter le nombre de micro-organismes (P74) et renseigner la feuille ATB correspondante"
+  )
+incoherences[["Culture pos. sans micro-org."]] <- nrow(cult_pos)
+
+# Résultat ATB sans parent dans feuille principale
+atb_orphelins <- atb %>% filter(!`_parent_index` %in% main$`_index`)
+if (nrow(atb_orphelins) > 0)
+  log_issue(
+    feuille    = "ATB",
+    variable   = "_parent_index",
+    type_erreur= "Enregistrement orphelin",
+    n_obs      = nrow(atb_orphelins),
+    correction = "Vérifier si ces lignes ATB correspondent à des patients supprimés ou à des erreurs de liaison ; supprimer ou relier"
+  )
+incoherences[["ATB sans parent"]] <- nrow(atb_orphelins)
+
+df_inc <- tibble(
+  Contrôle  = names(incoherences),
+  N_erreurs = unlist(incoherences)
+) %>% mutate(Statut = ifelse(N_erreurs == 0, "\u2714 OK", "\u2716 À corriger"))
+
+kable(df_inc,
+      caption = "Résumé des incohérences logiques",
+      col.names = c("Contrôle", "N erreurs", "Statut")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  row_spec(which(df_inc$N_erreurs > 0), color = "white", background = ROUGE)
+```
+
+---
+
+# Feuille Comorbidite {.tabset}
+
+## 2.1 Données manquantes
+
+```{r como_miss}
+vars_como      <- c("P11. CONDITION", "P12. Date de debut", "P13. En cours (O/N)")
+miss_como <- como %>%
+  select(all_of(vars_como)) %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "N_manquants") %>%
+  mutate(Pct = round(N_manquants / nrow(como) * 100, 1))
+
+miss_como %>% filter(N_manquants > 0) %>%
+  pwalk(~log_issue(
+    feuille    = "Comorbidite",
+    variable   = ..1,
+    type_erreur= "Valeur manquante",
+    n_obs      = ..2,
+    details    = paste0(..3, "%"),
+    correction = "Compléter depuis le CRF papier correspondant à la ligne concernée"
+  ))
+
+kable(miss_como,
+      caption = "Données manquantes \u2013 Comorbidite",
+      col.names = c("Variable", "N manquants", "%")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+## 2.2 Cohérence des dates
+
+```{r como_dates}
+como <- como %>%
+  mutate(
+    date_debut = as.Date(`P12. Date de debut`),
+    date_fin   = as.Date(`P14. Date de Fin`)
+  )
+
+# Fin avant début
+como_incoh <- como %>%
+  filter(!is.na(date_debut) & !is.na(date_fin) & date_fin < date_debut)
+cat(sprintf("Dates fin < dates début : %d\n", nrow(como_incoh)))
+
+if (nrow(como_incoh) > 0)
+  log_issue(
+    feuille    = "Comorbidite",
+    variable   = "P12/P14 Dates",
+    type_erreur= "Date fin < date début",
+    n_obs      = nrow(como_incoh),
+    correction = "Vérifier et corriger les dates sur le CRF papier ; si la comorbidité est toujours en cours, mettre P13 = 'Non' et laisser la date de fin vide"
+  )
+
+# En cours = Non mais pas de date de fin
+en_cours_non_sans_fin <- como %>%
+  filter(`P13. En cours (O/N)` == "Non" & is.na(date_fin))
+cat(sprintf("En cours = Non mais date fin manquante : %d\n", nrow(en_cours_non_sans_fin)))
+
+if (nrow(en_cours_non_sans_fin) > 0)
+  log_issue(
+    feuille    = "Comorbidite",
+    variable   = "P13/P14 En cours vs date fin",
+    type_erreur= "En cours = Non sans date fin",
+    n_obs      = nrow(en_cours_non_sans_fin),
+    correction = "Renseigner la date de fin (P14) pour ces comorbidités déclarées terminées"
+  )
+
+como %>%
+  count(`P13. En cours (O/N)`, name = "N") %>%
+  kable(caption = "Distribution 'En cours'") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+---
+
+# Feuille ATB (Antibiogramme) {.tabset}
+
+## 3.1 Données manquantes
+
+```{r atb_miss}
+vars_atb_cles <- c(
+  "P77. Num\u00e9ro d\u2019isolat",
+  "P78. Choisir un des germes isol\u00e9s pr\u00e9c\u00e9demment",
+  "P79. Ampicilline",
+  "P85. C\u00e9fotaxime",
+  "P86. Ceftazidime",
+  "P87. Ertap\u00e9n\u00e8me",
+  "P88. Imip\u00e9n\u00e8me"
+)
+vars_atb_exist <- vars_atb_cles[vars_atb_cles %in% names(atb)]
+
+miss_atb <- atb %>%
+  select(all_of(vars_atb_exist)) %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "N_manquants") %>%
+  mutate(Pct = round(N_manquants / nrow(atb) * 100, 1))
+
+miss_atb %>% filter(N_manquants > 0) %>%
+  pwalk(~log_issue(
+    feuille    = "ATB",
+    variable   = ..1,
+    type_erreur= "Valeur manquante",
+    n_obs      = ..2,
+    details    = paste0(..3, "%"),
+    correction = "Compléter le résultat d'antibiogramme depuis le registre du laboratoire"
+  ))
+
+kable(miss_atb,
+      caption = "Données manquantes \u2013 ATB",
+      col.names = c("Variable", "N manquants", "%")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+## 3.2 Valeurs attendues des résistances
+
+```{r atb_vals}
+val_att_atb <- c("Sensible", "Interm\u00e9diare", "R\u00e9sistant", "Indetermin\u00e9")
+cols_atb    <- names(atb)[grepl("^P(79|80|81|82|83|84|85|86|87|88|89|90|91|92|93|94|95|96)\\.",
+                                names(atb))]
+
+val_inat_atb <- cols_atb %>%
+  map_df(function(col) {
+    vals <- na.omit(atb[[col]])
+    inat <- setdiff(vals, val_att_atb)
+    if (length(inat) > 0)
+      tibble(Variable = col,
+             Valeurs_inattendues = paste(unique(inat), collapse = ", "),
+             N = length(inat))
+    else
+      tibble(Variable = character(), Valeurs_inattendues = character(), N = integer())
+  })
+
+if (nrow(val_inat_atb) > 0) {
+  val_inat_atb %>%
+    pwalk(~log_issue(
+      feuille    = "ATB",
+      variable   = ..1,
+      type_erreur= "Valeur inattendue",
+      n_obs      = ..3,
+      details    = ..2,
+      correction = paste0("Remplacer les valeurs non conformes par une des valeurs attendues : ",
+                          paste(val_att_atb, collapse = ", "),
+                          ". Vérifier dans le registre du laboratoire.")
+    ))
+  kable(val_inat_atb,
+        caption = "Valeurs inattendues dans les colonnes de résistance") %>%
+    kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+    row_spec(seq_len(nrow(val_inat_atb)), background = "#FFF3CD")
+} else {
+  cat("Toutes les valeurs de résistance sont conformes aux modalités attendues.")
+}
+
+# Heatmap résistances
+res_pct <- cols_atb %>%
+  map_df(function(col) {
+    pct_R <- mean(atb[[col]] == "R\u00e9sistant", na.rm = TRUE) * 100
+    tibble(Antibiotique = str_remove(col, "^P\\d+\\.\\s*"),
+           Pct_Resistant = round(pct_R, 1))
+  }) %>%
+  arrange(desc(Pct_Resistant))
+
+ggplot(res_pct, aes(x = reorder(Antibiotique, Pct_Resistant),
+                    y = Pct_Resistant, fill = Pct_Resistant)) +
+  geom_col() +
+  scale_fill_gradient(low = VERT, high = ROUGE, name = "% R") +
+  coord_flip() +
+  labs(title = "Profil de résistance des isolats (%)",
+       x = NULL, y = "% Résistant") +
+  theme_minimal(base_size = 10)
+```
+
+## 3.3 Cohérence germe / phénotype
+
+```{r atb_coherence}
+sans_germe <- atb %>%
+  filter(is.na('P78. Choisir un des germes isol\u00e9s pr\u00e9c\u00e9demment') &
+           is.na('P78.1. Pr\u00e9cisez le nom de ce germe'))
+
+cat(sprintf("Isolats sans germe identifié : %d\n", nrow(sans_germe)))
+
+if (nrow(sans_germe) > 0)
+  log_issue(
+    feuille    = "ATB",
+    variable   = "P78 Germe isol\u00e9",
+    type_erreur= "Germe manquant",
+    n_obs      = nrow(sans_germe),
+    correction = "Compléter l'identification du germe depuis le registre du laboratoire de microbiologie"
+  )
+```
+
+---
+
+# Feuille Medicament {.tabset}
+
+## 4.1 Données manquantes
+
+```{r med_miss}
+vars_med <- c(
+  "P16. Nom du m\u00e9dicament",
+  "P17. Substance active (DCI)",
+  "P18. Date de d\u00e9but (jj/mm/aaaa)",
+  "P21. Voie d\u2019administration du m\u00e9dicament"
+)
+vars_med_exist <- vars_med[vars_med %in% names(med)]
+
+miss_med <- med %>%
+  select(all_of(vars_med_exist)) %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "N_manquants") %>%
+  mutate(Pct = round(N_manquants / nrow(med) * 100, 1))
+
+miss_med %>% filter(N_manquants > 0) %>%
+  pwalk(~log_issue(
+    feuille    = "medicament",
+    variable   = ..1,
+    type_erreur= "Valeur manquante",
+    n_obs      = ..2,
+    details    = paste0(..3, "%"),
+    correction = "Compléter depuis le CRF papier ou l'ordonnance du patient"
+  ))
+
+kable(miss_med,
+      caption = "Données manquantes \u2013 Médicaments",
+      col.names = c("Variable", "N manquants", "%")) %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+## 4.2 Cohérence des dates
+
+```{r med_dates}
+med <- med %>%
+  mutate(
+    d_debut = as.Date(`P18. Date de début (jj/mm/aaaa)`, format = "%d/%m/%Y"),
+    d_fin   = as.Date(`P20. Date de fin (jj/mm/aaaa)`,   format = "%d/%m/%Y")
+  )
+
+med_date_incoh <- med %>%
+  filter(!is.na(d_debut) & !is.na(d_fin) & d_fin < d_debut)
+
+cat(sprintf("Date fin < date début (médicament) : %d\n", nrow(med_date_incoh)))
+
+if (nrow(med_date_incoh) > 0)
+  log_issue(
+    feuille    = "medicament",
+    variable   = "P18/P20 Dates",
+    type_erreur= "Date fin < date début",
+    n_obs      = nrow(med_date_incoh),
+    correction = "Vérifier et corriger les dates sur le CRF ou l'ordonnance ; si le traitement est en cours, laisser la date de fin vide"
+  )
+
+med %>%
+  count('P21. Voie d\u2019administration du m\u00e9dicament', name = "N") %>%
+  arrange(desc(N)) %>%
+  kable(caption = "Voies d'administration") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+---
+
+# Récapitulatif du Contrôle de Qualité
+
+```{r recap}
+journal_df <- bind_rows(journal)
+
+if (nrow(journal_df) == 0) {
+  cat("\u2714 Aucune anomalie détectée dans l'ensemble de la base.")
+} else {
+
+  stats_recap <- journal_df %>%
+    group_by(Feuille, Type_erreur) %>%
+    summarise(N_obs = sum(N_obs), N_variables = n(), .groups = "drop") %>%
+    arrange(Feuille, desc(N_obs))
+
+  kable(stats_recap,
+        caption = "Tableau récapitulatif des anomalies détectées",
+        col.names = c("Feuille", "Type d'erreur", "N observations", "N variables")) %>%
+    kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                  full_width = FALSE) %>%
+    row_spec(which(stats_recap$N_obs > 100), color = "white", background = ROUGE) %>%
+    row_spec(which(stats_recap$N_obs > 0 & stats_recap$N_obs <= 100),
+             background = "#FFF3CD")
+}
+
+# Score qualité global
+total_cellules <- nrow(main) * length(vars_cles_exist) +
+                  nrow(como) * 3 +
+                  nrow(atb)  * length(cols_atb) +
+                  nrow(med)  * 4
+total_erreurs  <- if (nrow(journal_df) > 0) sum(journal_df$N_obs) else 0
+score_qualite  <- round((1 - total_erreurs / total_cellules) * 100, 1)
+
+cat(sprintf("\n\n\U0001f4ca SCORE DE QUALIT\u00c9 GLOBAL : %.1f%%\n", score_qualite))
+cat(sprintf("   Cellules analysées : %d | Anomalies détectées : %d\n",
+            total_cellules, total_erreurs))
+```
+
+---
+
+# Export du journal de contrôle
+
+```{r export_excel}
+wb <- createWorkbook()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Styles communs
+# ══════════════════════════════════════════════════════════════════════════════
+style_header <- createStyle(
+  fontName       = "Arial", fontSize = 11,
+  fontColour     = "white", fgFill = "#2C3E50",
+  halign         = "CENTER", textDecoration = "bold",
+  border         = "Bottom", wrapText = TRUE
+)
+style_rouge  <- createStyle(fgFill = "#FADBD8")
+style_orange <- createStyle(fgFill = "#FDEBD0")
+style_vert   <- createStyle(fgFill = "#D5F5E3")
+style_rouge_txt <- createStyle(fgFill = "#FADBD8", fontColour = "#922B21",
+                               textDecoration = "bold")
+
+# ── Feuille 1 : JOURNAL FINAL COMPLET ─────────────────────────────────────────
+# Colonnes exportées (ordre affiché) :
+#   ID_anomalie | Feuille | Variable | Type_erreur | N_obs |
+#   Degre_impact | Details | IDs | Correction_proposee
+# ──────────────────────────────────────────────────────────────────────────────
+addWorksheet(wb, "Journal_Final")
+
+if (nrow(journal_df) > 0) {
+
+  journal_export <- journal_df %>%
+    select(ID_anomalie, Feuille, Variable, Type_erreur,
+           N_obs, Degre_impact, Details, IDs, Correction_proposee) %>%
+    arrange(
+      factor(Degre_impact, levels = c("Critique", "Majeur", "Mineur", "Aucun")),
+      Feuille, desc(N_obs)
+    )
+
+  writeData(wb, "Journal_Final", journal_export, startRow = 1)
+
+  # En-tête
+  addStyle(wb, "Journal_Final", style_header,
+           rows = 1, cols = 1:ncol(journal_export), gridExpand = TRUE)
+
+  # Coloration par degré d'impact
+  for (i in seq_len(nrow(journal_export))) {
+    s <- switch(journal_export$Degre_impact[i],
+                "Critique" = style_rouge_txt,
+                "Majeur"   = style_orange,
+                "Mineur"   = style_vert,
+                NULL)
+    if (!is.null(s))
+      addStyle(wb, "Journal_Final", s,
+               rows = i + 1, cols = 1:ncol(journal_export), gridExpand = TRUE)
+  }
+
+  # Largeurs colonnes
+  setColWidths(wb, "Journal_Final", cols = 1:ncol(journal_export),
+               widths = c(12, 22, 40, 30, 8, 12, 35, 30, 55))
+
+  # Figer l'en-tête
+  freezePane(wb, "Journal_Final", firstRow = TRUE)
+}
+
+# ── Feuille 2 : Manquants feuille principale ──────────────────────────────────
+addWorksheet(wb, "Manquants_Principal")
+writeData(wb, "Manquants_Principal", miss_main)
+addStyle(wb, "Manquants_Principal",
+         createStyle(fontName = "Arial", fontColour = "white", fgFill = "#2980B9",
+                     textDecoration = "bold", halign = "CENTER"),
+         rows = 1, cols = 1:3, gridExpand = TRUE)
+setColWidths(wb, "Manquants_Principal", cols = 1:3, widths = c(60, 15, 15))
+
+# ── Feuille 3 : Doublons ──────────────────────────────────────────────────────
+addWorksheet(wb, "Doublons")
+if (nrow(dup_id) > 0) {
+  writeData(wb, "Doublons",
+            dup_id %>%
+              select(`Identifiant participant`,
+                     'P4. Date d\u2019inclusion dans l\u2019\u00e9tude (jj/mm/aaaa)',
+                     `P6. Sexe`, `P7. Age`, `_index`))
+  addStyle(wb, "Doublons", style_header, rows = 1, cols = 1:5, gridExpand = TRUE)
+  setColWidths(wb, "Doublons", cols = 1:5, widths = c(25, 40, 12, 10, 10))
+}
+
+# ── Feuille 4 : Âges aberrants ────────────────────────────────────────────────
+addWorksheet(wb, "Ages_aberrants")
+if (nrow(age_ab) > 0) {
+  writeData(wb, "Ages_aberrants",
+            age_ab %>%
+              select(`Identifiant participant`, `P7. Age`,
+                     `P6.1. Date de naissance`, `P6. Sexe`))
+  addStyle(wb, "Ages_aberrants", style_header, rows = 1, cols = 1:4, gridExpand = TRUE)
+  setColWidths(wb, "Ages_aberrants", cols = 1:4, widths = c(25, 10, 25, 12))
+}
+
+# ── Feuille 5 : Sexe invalide ─────────────────────────────────────────────────
+addWorksheet(wb, "Sexe_invalide")
+if (nrow(sexe_invalide) > 0) {
+  writeData(wb, "Sexe_invalide",
+            sexe_invalide %>%
+              select(`Identifiant participant`, `P6. Sexe`, `P7. Age`,
+                     'P4. Date d\u2019inclusion dans l\u2019\u00e9tude (jj/mm/aaaa)'))
+  addStyle(wb, "Sexe_invalide", style_header, rows = 1, cols = 1:4, gridExpand = TRUE)
+  addStyle(wb, "Sexe_invalide", style_rouge,
+           rows = 2:(nrow(sexe_invalide) + 1), cols = 1:4, gridExpand = TRUE)
+  setColWidths(wb, "Sexe_invalide", cols = 1:4, widths = c(25, 15, 10, 40))
+}
+
+# ── Feuille 6 : Discordance identifiants ─────────────────────────────────────
+addWorksheet(wb, "Discordance_Identifiants")
+if (exists("discordants") && nrow(discordants) > 0) {
+  disc_export <- discordants %>%
+    select(all_of(col_part), all_of(col_incl),
+           `P6. Sexe`, `P7. Age`,
+           'P4. Date d\u2019inclusion dans l\u2019\u00e9tude (jj/mm/aaaa)')
+  writeData(wb, "Discordance_Identifiants", disc_export)
+  addStyle(wb, "Discordance_Identifiants", style_header,
+           rows = 1, cols = 1:ncol(disc_export), gridExpand = TRUE)
+  addStyle(wb, "Discordance_Identifiants", style_rouge,
+           rows = 2:(nrow(disc_export) + 1),
+           cols = 1:ncol(disc_export), gridExpand = TRUE)
+  setColWidths(wb, "Discordance_Identifiants",
+               cols = 1:ncol(disc_export), widths = c(25, 25, 12, 10, 40))
+}
+
+# ── Feuille 7 : Format identifiant ───────────────────────────────────────────
+addWorksheet(wb, "Format_Identifiant")
+writeData(wb, "Format_Identifiant", format_resume)
+addStyle(wb, "Format_Identifiant", style_header, rows = 1, cols = 1:3, gridExpand = TRUE)
+setColWidths(wb, "Format_Identifiant", cols = 1:3, widths = c(40, 10, 10))
+if (exists("formats_minoritaires") && nrow(formats_minoritaires) > 0) {
+  writeData(wb, "Format_Identifiant",
+            formats_minoritaires %>% rename(`Identifiant` = ID),
+            startRow = nrow(format_resume) + 4)
+}
+
+# ── Feuille 8 : Résistances ATB ───────────────────────────────────────────────
+addWorksheet(wb, "Resistances_ATB")
+writeData(wb, "Resistances_ATB", res_pct)
+addStyle(wb, "Resistances_ATB",
+         createStyle(fontName = "Arial", fontColour = "white", fgFill = "#C0392B",
+                     textDecoration = "bold"),
+         rows = 1, cols = 1:2, gridExpand = TRUE)
+setColWidths(wb, "Resistances_ATB", cols = 1:2, widths = c(40, 20))
+
+# ── Feuille 9 : Récapitulatif global ──────────────────────────────────────────
+addWorksheet(wb, "Recapitulatif")
+recap_data <- tibble(
+  Indicateur = c(
+    "Date du contrôle",
+    "Feuille principale (N lignes)",
+    "Feuille Comorbidite (N lignes)",
+    "Feuille ATB (N lignes)",
+    "Feuille Medicament (N lignes)",
+    "Score qualité global (%)",
+    "Total anomalies enregistrées",
+    "dont Critiques",
+    "dont Majeures",
+    "dont Mineures",
+    "Doublons identifiant participant",
+    "Sexe invalide",
+    "Discordance identifiants"
+  ),
+  Valeur = c(
+    as.character(Sys.time()),
+    nrow(main), nrow(como), nrow(atb), nrow(med),
+    score_qualite,
+    nrow(journal_df),
+    if (nrow(journal_df) > 0) sum(journal_df$Degre_impact == "Critique", na.rm = TRUE) else 0,
+    if (nrow(journal_df) > 0) sum(journal_df$Degre_impact == "Majeur",   na.rm = TRUE) else 0,
+    if (nrow(journal_df) > 0) sum(journal_df$Degre_impact == "Mineur",   na.rm = TRUE) else 0,
+    nrow(dup_id),
+    nrow(sexe_invalide),
+    if (exists("discordants")) nrow(discordants) else 0
+  )
+)
+writeData(wb, "Recapitulatif", recap_data)
+addStyle(wb, "Recapitulatif",
+         createStyle(fontName = "Arial", fontColour = "white", fgFill = "#2C3E50",
+                     textDecoration = "bold"),
+         rows = 1, cols = 1:2, gridExpand = TRUE)
+setColWidths(wb, "Recapitulatif", cols = 1:2, widths = c(40, 30))
+
+# ── Sauvegarde ────────────────────────────────────────────────────────────────
+fichier_sortie <- paste0("Journal_CQ_FASO_RAM_", format(Sys.Date(), "%Y%m%d"), ".xlsx")
+saveWorkbook(wb, fichier_sortie, overwrite = TRUE)
+cat(sprintf("\u2714 Journal exporté : %s\n", fichier_sortie))
+```
+
+---

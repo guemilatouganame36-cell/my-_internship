@@ -1,0 +1,1065 @@
+---
+output:
+  pdf_document:
+    latex_engine: xelatex
+fontsize: 12pt
+geometry: "left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm"
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{array}
+  - \usepackage[table]{xcolor}
+  - \usepackage{float}
+  - \usepackage{microtype}
+  - \usepackage{indentfirst}
+  - \setlength{\parindent}{0.8cm}
+  - \setlength{\parskip}{0.25cm}
+  - \definecolor{bleubord}{RGB}{0,102,204}
+---
+\newpage
+\addcontentsline{toc}{section}{Chapitre 3 : Présentation des résultats et Interpretation}
+
+```{=latex}
+\begin{flushright}
+{\fontsize{22}{26}\selectfont \textbf{\textcolor{bleubord}{Chapitre 3}}}\\[2pt]
+{\large \textbf{\textcolor{bleubord}{Présentation des résultats et Interpretation}}}\\[4pt]
+{\color{bleubord}\rule{10cm}{2pt}}
+\end{flushright}
+\vspace{0.6cm}
+```
+
+
+```{r , include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE, warning = FALSE, message = FALSE,
+  fig.pos = "H",  out.width = "68%", fig.align = "center", dpi = 300
+)
+library(readxl); library(dplyr); library(tidyr); library(ggplot2)
+library(knitr);  library(kableExtra); library(scales)
+library(pROC);   library(car); library(ResourceSelection)
+library(forcats); library(stringr); library(gridExtra)
+
+COL_ROUGE  <- "#C0392B"; COL_VERT  <- "#27AE60"; COL_BLEU_F <- "#2980B9"
+COL_BLEU_L <- "#AED6F1"; COL_ROSE  <- "#E91E8C"; COL_ORANGE <- "#E67E22"
+COL_GRIS   <- "#95A5A6"; COL_VERT2 <- "#1A8C5B"; COL_BLEU2  <- "#1A5276"
+
+theme_faso <- theme_minimal(base_size=10) +
+  theme(plot.title=element_text(face="bold",size=11,hjust=0.5,color="#2C3E50"),
+        plot.subtitle=element_text(size=9,color="#7F8C8D",hjust=0.5),
+        axis.text=element_text(size=9), axis.title=element_text(size=9),
+        legend.position="bottom", legend.text=element_text(size=9),
+        panel.grid.minor=element_blank())
+norm_txt <- function(x) {
+  x <- toupper(trimws(as.character(x)))
+  iconv(x, from="UTF-8", to="ASCII//TRANSLIT")
+}
+```
+
+```{r chargement, include=FALSE}
+df_raw <- read_excel("FASO_RAM_FINALE_20260701.xlsx", sheet="FASO_RAM_RESAISIE")
+
+# Noms colonnes avec accents récupérés par grep
+col_edu    <- grep("Niveau.*Education|Education.*Niveau", names(df_raw), value=TRUE, ignore.case=TRUE)[1]
+col_prof   <- grep("Profession", names(df_raw), value=TRUE, ignore.case=TRUE)[1]
+col_site   <- grep("Site de recrutement", names(df_raw), value=TRUE, ignore.case=TRUE)[1]
+col_comor  <- grep("ant.*cedents|comorbid", names(df_raw), value=TRUE, ignore.case=TRUE)[1]
+col_cadre  <- grep("^P24", names(df_raw), value=TRUE, ignore.case=TRUE)[1]
+
+df <- df_raw %>%
+  mutate(
+    # Cible
+    Porteur_BMR = factor(Porteur_BMR_fac, levels=c("Non porteur","Porteur BMR")),
+    outcome     = as.integer(Porteur_BMR_fac == "Porteur BMR"),
+    # Sexe
+    sexe        = factor(FLAG_SEXE_INVALIDE, levels=c("Femme","Homme")),
+    # Age - tranche gardée telle quelle
+    tranche_age = factor(tranche_age,
+                         levels=c("\u226419 ans","20\u201334 ans","35\u201349 ans","\u226550 ans")),
+    # Cadre
+    cadre_vie   = factor(.data[[col_cadre]],
+                         levels=c("Urbain","P\u00e9ri-urbain","Zone rurale/village")),
+    # Education
+    niveau_edu  = factor(.data[[col_edu]],
+                         levels=c("Pas de scolarisation","Education primaire",
+                                  "Education secondaire","Dipl\u00f4me universitaire","Autre")),
+    # Profession
+    profession  = factor(.data[[col_prof]]),
+    # Site
+    site = factor(case_when(
+      .data[[col_site]] == "CSPS"  ~ "CSPS",
+      .data[[col_site]] == "HDJ"   ~ "HDJ",
+      .data[[col_site]] == "CHUSS" ~ "CHUSS",
+      TRUE ~ "Autre"), levels=c("CSPS","HDJ","CHUSS","Autre")),
+    # Comorbidites
+    comor = factor(case_when(
+      .data[[col_comor]] == "Oui" ~ "Oui",
+      .data[[col_comor]] == "Non" ~ "Non",
+      TRUE ~ NA_character_), levels=c("Non","Oui")),
+    # Classes composites - garder niveaux originaux SANS binarisation
+    hyg   = factor(classe_hygiene,
+                   levels=c("Bonne hygi\u00e8ne","Hygi\u00e8ne interm\u00e9diaire","Mauvaise hygi\u00e8ne")),
+    eau   = factor(classe_eau,
+                   levels=c("Eau sure","Risque modere","Risque eleve")),
+   atb   = factor(case_when(
+          grepl("^PAS",  norm_txt(classe_exposition_atb)) ~ "Pas d'exposition",
+          grepl("FORT",  norm_txt(classe_exposition_atb)) ~ "Exposition forte",
+          grepl("MODER", norm_txt(classe_exposition_atb)) ~ "Exposition modérée",
+          TRUE ~ NA_character_),
+          levels=c("Pas d'exposition","Exposition modérée","Exposition forte")),
+    anim  = factor(classe_contact_animal,
+                   levels=c("Contact mod\u00e9r\u00e9","Pas de contact",
+                             "Contact \u00e9lev\u00e9 + ATB v\u00e9t.")),
+    env   = factor(case_when(
+          grepl("^PAS",  norm_txt(classe_env_agricole)) ~ "Pas d'exposition",
+          grepl("ELEV",  norm_txt(classe_env_agricole)) ~ "Exposition élevée",
+          grepl("MODER", norm_txt(classe_env_agricole)) ~ "Exposition modérée",
+          TRUE ~ NA_character_),
+          levels=c("Pas d'exposition","Exposition modérée","Exposition élevée"))
+  ) %>% filter(!is.na(Porteur_BMR))
+
+# Statistiques globales
+N      <- nrow(df)
+n_port <- sum(df$outcome)
+prev   <- n_port/N
+prev_l <- prev - 1.96*sqrt(prev*(1-prev)/N)
+prev_u <- prev + 1.96*sqrt(prev*(1-prev)/N)
+am     <- mean(df$AGE_NETTOYE, na.rm=TRUE)
+asd    <- sd(df$AGE_NETTOYE,   na.rm=TRUE)
+amed   <- median(df$AGE_NETTOYE, na.rm=TRUE)
+aq1    <- quantile(df$AGE_NETTOYE, .25, na.rm=TRUE)
+aq3    <- quantile(df$AGE_NETTOYE, .75, na.rm=TRUE)
+n_fem  <- sum(df$sexe=="Femme",  na.rm=TRUE)
+n_masc <- sum(df$sexe=="Homme",  na.rm=TRUE)
+n_urb  <- sum(df$cadre_vie=="Urbain", na.rm=TRUE)
+```
+
+Ce chapitre présente les résultats de l'analyse ,une discussion des résultats puis l'apport décisionnel de cette l'étude effectuée.
+
+## I.Analyse descriptive générale
+
+### 1.Description de la population d'étude
+
+Avant d'étudier le portage des bactéries multirésistantes, il convient de décrire la population sur laquelle porte l'ensemble de l'analyse. Nous présentons d'abord ses principales caractéristiques socio-démographiques. Le tableau \ref{tab:tab-sociodem} ci desoous récapitule les principales caractéristiques socio-démographiques de la population étudiée : effectif total, âge (moyenne, écart-type et médiane) ainsi que répartition selon le sexe et le cadre de vie. Il en ressort que la population comprend **`r N` participants**, d'âge moyen **`r sprintf("%.1f", am)` ans**. Les femmes y sont majoritaires (`r sprintf("%.1f", n_fem/N*100)`%), ce qui reflète le profil habituel des consultants en milieu hospitalier, et la quasi-totalité des participants réside en milieu urbain (`r sprintf("%.1f", n_urb/N*100)`%), cohérent avec un site d'étude centré sur la ville de Bobo-Dioulasso.
+
+```{r tab-sociodem}
+tab1 <- data.frame(
+  Caracteristique=c("Effectif total","Age moyen ecart-type (ans)",
+                    "Mediane d'age IQR","Sexe feminin n (%)","Sexe masculin n (%)",
+                    "Cadre urbain n (%)","Cadre peri-urbain n (%)","Cadre rural n (%)"),
+  Valeur=c(as.character(N),
+           sprintf("%.1f +/- %.1f", am, asd),
+           sprintf("%.0f [%.0f - %.0f]", amed, aq1, aq3),
+           sprintf("%d (%.1f%%)", n_fem,  n_fem/N*100),
+           sprintf("%d (%.1f%%)", n_masc, n_masc/N*100),
+           sprintf("%d (%.1f%%)", n_urb,  n_urb/N*100),
+           sprintf("%d (%.1f%%)", sum(df$cadre_vie=="P\u00e9ri-urbain",na.rm=T),
+                   sum(df$cadre_vie=="P\u00e9ri-urbain",na.rm=T)/N*100),
+           sprintf("%d (%.1f%%)", sum(df$cadre_vie=="Zone rurale/village",na.rm=T),
+                   sum(df$cadre_vie=="Zone rurale/village",na.rm=T)/N*100)),
+  stringsAsFactors=FALSE)
+kable(tab1, booktabs=TRUE, linesep="", col.names=c("Caracteristique","Valeur"),
+      caption="Caracteristiques socio-demographiques de la population de l'étude") %>%
+  kable_styling(latex_options=c("hold_position","striped"), font_size=8, full_width=FALSE) %>%
+  row_spec(0, bold=TRUE)
+```
+
+Afin de mieux cerner la structure par âge de l'échantillon, nous détaillons ensuite la répartition des participants par tranche d'âge. Le tableau \ref{tab:tab-tranche-age} détaille la répartition des participants selon les quatre tranches d'âge retenues dans l'étude (≤19 ans, 20-34 ans, 35-49 ans, ≥50 ans), ce qui permet d'apprécier la structure par âge de l'échantillon et servira de base de comparaison pour l'analyse bivariée présentée plus loin.
+
+```{r tab-tranche-age}
+tab_tage <- df %>% filter(!is.na(tranche_age)) %>% count(tranche_age) %>%
+  mutate(Pourcentage=sprintf("%.1f%%", n/sum(n)*100)) %>%
+  rename("Tranche d'age"=tranche_age, N=n)
+kable(tab_tage, booktabs=TRUE, linesep="",
+      caption="Répartition de la population selon la tranche d'âge") %>%
+  kable_styling(latex_options=c("hold_position","striped"), font_size=8, full_width=FALSE) %>%
+  row_spec(0, bold=TRUE)
+```
+
+Nous nous intéressons à présent à la répartition professionnelle des participants, une variable qui sera reprise plus loin dans l'analyse des facteurs de risque. Le tableau \ref{tab:tab-profession} présente la répartition des participants selon leur profession. Pour en faciliter la lecture, seules les six catégories les plus fréquentes sont détaillées individuellement, les autres professions étant regroupées dans une ligne « Autres », dont le détail complet est disponible en annexe.
+
+```{r tab-profession}
+tab_prof_full <- df %>% filter(!is.na(profession)) %>%
+  mutate(profession=as.character(profession)) %>%
+  count(profession, sort=TRUE) %>%
+  mutate(Pourcentage=n/sum(n)*100)
+
+top6   <- head(tab_prof_full, 6)
+autres <- tab_prof_full %>% slice(7:n())
+tab_prof <- bind_rows(
+  top6,
+  data.frame(profession=sprintf("Autres professions (%d categories regroupees, cf. annexe)",
+                                 nrow(autres)),
+             n=sum(autres$n), Pourcentage=sum(autres$Pourcentage))
+) %>%
+  mutate(Pourcentage=sprintf("%.1f%%", Pourcentage)) %>%
+  rename(Profession=profession, N=n)
+
+kable(tab_prof, booktabs=TRUE, linesep="",
+      caption="Répartition de la population selon la profession (6 plus frequentes)") %>%
+  kable_styling(latex_options=c("hold_position","striped"), font_size=8) %>%
+  row_spec(0, bold=TRUE) %>%
+  row_spec(nrow(tab_prof), italic=TRUE)
+```
+
+Enfin, pour compléter ce profil général, nous examinons le niveau d'instruction de la population étudiée. Le tableau \ref{tab:tab-education} montre la répartition des participants selon leur niveau d'instruction, du « pas de scolarisation » au « diplôme universitaire », variable qui sera également reprise dans l'analyse bivariée et multivariée.
+
+
+```{r tab-education}
+tab_edu <- df %>% filter(!is.na(niveau_edu)) %>% count(niveau_edu) %>%
+  mutate(Pourcentage=sprintf("%.1f%%", n/sum(n)*100)) %>%
+  rename("Niveau d'education"=niveau_edu, N=n)
+kable(tab_edu, booktabs=TRUE, linesep="",
+      caption="Répartition de la population selon le niveau de l'éducation") %>%
+  kable_styling(latex_options=c("hold_position","striped"), font_size=8, full_width=FALSE) %>%
+  row_spec(0, bold=TRUE)
+```
+
+
+### 2.Prévalence du portage digestif des BMR
+
+Après avoir décrit la population, nous nous intéressons maintenant à l'indicateur central de cette étude : la prévalence du portage digestif des BMR. Le tableau \ref{tab:tab-prevalence} synthétise les résultats du dépistage du portage digestif des BMR : nombre de prélèvements réalisés, nombre et proportion de cultures positives et négatives, ainsi que la prévalence globale assortie de son intervalle de confiance à 95 %. Il en ressort une prévalence du portage digestif des BMR de **`r sprintf("%.1f%%",prev*100)`** (IC 95% : [`r sprintf("%.1f%%",prev_l*100)` - `r sprintf("%.1f%%",prev_u*100)`]), ce qui traduit une diffusion importante des entérobactéries résistantes dans la population étudiée.
+
+```{r tab-prevalence}
+tab_prev <- data.frame(
+  Indicateur=c("Prelevements realises","Cultures positives (porteurs BMR)",
+               "Cultures negatives","Prevalence (%)","IC 95% (methode Wilson)"),
+  Valeur=c(as.character(N), sprintf("%d (%.1f%%)",n_port,prev*100),
+           sprintf("%d (%.1f%%)",N-n_port,(1-prev)*100),
+           sprintf("%.1f%%",prev*100),
+           sprintf("[%.1f%% - %.1f%%]",prev_l*100,prev_u*100)),
+  stringsAsFactors=FALSE)
+kable(tab_prev, booktabs=TRUE, linesep="", col.names=c("Indicateur","Valeur"),
+      caption="Prévalence du portage digestif des BMR") %>%
+  kable_styling(latex_options=c("hold_position","striped"), font_size=8, full_width=FALSE) %>%
+  row_spec(0, bold=TRUE)
+```
+
+
+### 3.Description des micro-organismes isolés
+
+Il convient à présent d'identifier quelles bactéries sont à l'origine de ce portage. Nous détaillons pour cela la diversité des micro-organismes isolés. Le tableau \ref{tab:tab-microorg} présente la distribution des différents micro-organismes isolés à partir des cultures positives, classés par ordre de fréquence décroissante, afin d'identifier les espèces bactériennes les plus impliquées dans le portage de BMR.
+
+```{r tab-microorg}
+mo_data <- data.frame(
+  Germe=c("Escherichia coli","Autre","Klebsiella pneumoniae",
+          "Enterobacter cloacae","Pantoea spp","Pandorea spp",
+          "Serratia marcescens","Serratia ficaria"),
+  n=c(324,67,54,53,20,3,2,2), stringsAsFactors=FALSE) %>%
+  mutate(Pourcentage=sprintf("%.1f%%", n/n_port*100)) %>%
+  rename("Micro-organisme"=Germe, N=n)
+kable(mo_data, booktabs=TRUE, linesep="",
+      caption="Micro-organismes isolés dans les cultures positives") %>%
+  kable_styling(latex_options=c("hold_position","striped"), font_size=8, full_width=FALSE) %>%
+  row_spec(0, bold=TRUE)
+```
+
+Afin de documenter précisément l'ampleur de la résistance observée, nous détaillons ensuite les taux de résistance mesurés pour chaque antibiotique testé. Le tableau \ref{tab:tab-resistance-atb} détaille, pour chaque antibiotique testé, le taux de résistance observé parmi l'ensemble des isolats ; les lignes surlignées en rose correspondent aux antibiotiques présentant un taux de résistance égal ou supérieur à 70 %, permettant de repérer d'un coup d'œil les molécules les moins efficaces dans ce contexte. Pris ensemble, les tableaux \@ref{tab:tab-microorg} et \ref{tab:tab-resistance-atb} montrent que, parmi les `r n_port` cultures positives, *Escherichia coli* est le micro-organisme le plus fréquemment isolé (324 isolats, 65.9%), suivi de *Klebsiella pneumoniae* (n=54, 11.0%) et *Enterobacter cloacae* (n=53, 10.8%), et que le phénotype BLSE domine parmi les béta-lactamines (80.2%), traduisant une résistance étendue aux céphalosporines de troisième génération.
+
+
+```{r tab-resistance-atb}
+atb_res <- data.frame(
+  Antibiotique=c("Ticarcilline","Cefotaxime","Ampicilline","Ofloxacine","Acide nalidixique",
+        "Trimethoprime/sulfamethoxazole","Cefalotine","Ceftazidime","Ciprofloxacine",
+        "Tobramycine","Gentamicine","Amoxicilline/acide clavulanique",
+        "Piperacilline/tazobactam","Cefoxitine","Ertapeneme","Amikacine",
+        "Imipeneme","Nitrofurantoine"),
+  Taux_resistance=c(92.7,86.3,80.7,78.9,75.7,65.3,59.1,58.6,50.1,40.3,36.0,27.9,15.8,
+        12.2,4.9,3.8,3.0,2.6), stringsAsFactors=FALSE) %>%
+  mutate(Taux_resistance=sprintf("%.1f%%", Taux_resistance))
+kable(atb_res, booktabs=TRUE, linesep="",
+      col.names=c("Antibiotique","% Resistant"),
+      caption="Taux de résistance par antibiotique") %>%
+  kable_styling(latex_options=c("hold_position","striped"), font_size=8, full_width=FALSE) %>%
+  row_spec(0, bold=TRUE) %>%
+  row_spec(which(as.numeric(gsub("%","",atb_res$Taux_resistance))>=70),
+           background="#FADBD8")
+```
+
+
+## II. Analyse exploratoire multivariée (ACM-CAH) - Création des classes
+
+Avant de conduire l'analyse bivariée et multivariée, nous synthétisons les résultats de la démarche exploratoire ACM-CAH qui a permis de construire les classes composites utilisées comme covariables dans les analyses qui suivent.Le tableau \ref{tab:tab-acm} résume, pour chacun des cinq blocs thématiques retenus (hygiène individuelle, qualité de l'eau, exposition aux antibiotiques, contact animal, environnement agricole), les variables élémentaires corrélées qui les composent ainsi que les classes synthétiques obtenues à l'issue d'une analyse des correspondances multiples (ACM) suivie d'une classification ascendante hiérarchique (CAH). Pour chaque bloc, l'axe factoriel principal de l'ACM oppose les profils à faible risque (pratiques protectrices) aux profils à risque élevé (exposition intense). Les classes obtenues sont cohérentes avec les connaissances épidémiologiques sur la transmission des BMR et constituent les covariables utilisées dans les analyses bivariée et multivariée qui suivent.La figure ci-dessous illustre, pour chacun des cinq blocs thématiques, le positionnement des variables filles sur le premier plan factoriel de l'ACM. La proximité entre deux variables traduit une association forte, justifiant leur regroupement en classes homogènes par la CAH présentée dans le \ref{tab:tab-acm}.
+
+```{r fig-acm-panel, echo=FALSE, fig.cap="Plans factoriels ACM des cinq blocs thematiques (Dim1 x Dim2)", fig.pos="H", out.width="60%", fig.align="center"}
+knitr::include_graphics("ACM_panel_5blocs.png")
+```
+
+Dans l'ensemble, ces cinq plans factoriels confirment que les variables filles de chaque bloc ne se répartissent pas au hasard : elles s'organisent selon des oppositions cohérentes entre pratiques protectrices et pratiques à risque. C'est cette structure qui a permis à la classification ascendante hiérarchique de construire, pour chaque thématique, des classes interprétables et statistiquement fondées, utilisées comme covariables dans les analyses bivariée et multivariée.
+
+```{r tab-acm, fig.pos="H"}
+tab_acm <- data.frame(
+  Bloc=c("Hygiene individuelle","Qualite de l'eau",
+         "Exposition ATB","Contact animal","Environnement agricole"),
+  Variables_filles=c(
+    "Type toilettes, lavage mains (2 moments), manipulation excrement, latrines partagees",
+    "Source eau, traitement eau, partage eau avec animaux",
+    "ATB patient (2 sem.), ATB foyer, exposition combinee, ATB sur cultures",
+    "Possession animaux, aliments medicamenteux, ATB animaux sains, ferme < 50 m",
+    "Terres cultivees, engrais fecaux, milieu agricole, manipulation excrement"
+  ),
+  Classes_creees=c(
+    "Bonne hyg. / Hygiene interm. / Mauvaise hyg.",
+    "Eau sure / Risque modere / Risque eleve",
+    "Pas d'exposition / Mod. / Forte",
+    "Pas de contact / Contact mod. / Contact eleve",
+    "Pas d'exposition / Mod. / Elevee"
+  ),
+  stringsAsFactors=FALSE)
+
+kable(tab_acm, booktabs=TRUE,
+      col.names=c("Bloc","Variables","Classes"),
+      caption="Resume de l analyse exploratoire ACM-CAH par bloc thematique") %>%
+  kable_styling(latex_options=c("hold_position","striped"),
+                font_size=8, full_width=FALSE) %>%
+  column_spec(1, width="2.5cm", bold=TRUE) %>%
+  column_spec(2, width="6.5cm") %>%
+  column_spec(3, width="4.5cm") %>%
+  row_spec(0, bold=TRUE)
+```
+
+
+
+## III.Analyse bivariée
+
+Pour chaque variable, nous calculons : le test d'association global (Chi2 ou Fisher), l'OR brut avec IC 95% par modalité par rapport à la réference, et pour l'âge continu un test de Student (ou Mann-Whitney selon normalité).
+
+```{r fonctions-bivar}
+# ── 1. Test global Chi2/Fisher ────────────────────────────────────────────────
+test_global <- function(var, data=df) {
+  d   <- data %>% filter(!is.na(.data[[var]]), !is.na(Porteur_BMR)) %>%
+         mutate(grp = as.character(.data[[var]]))
+  tbl <- table(d$grp, d$Porteur_BMR)
+  tbl <- tbl[rowSums(tbl)>0, colSums(tbl)>0, drop=FALSE]
+  if (nrow(tbl)<2 || ncol(tbl)<2) return(list(p=NA, test="NA"))
+  exp_v <- tryCatch(suppressWarnings(chisq.test(tbl)$expected), error=function(e) matrix(5,2,2))
+  if (any(exp_v<5)) {
+    p <- tryCatch(fisher.test(tbl, simulate.p.value=TRUE, B=10000)$p.value, error=function(e) NA)
+    list(p=p, test="Fisher")
+  } else {
+    p <- tryCatch(chisq.test(tbl)$p.value, error=function(e) NA)
+    list(p=p, test="Chi2")
+  }
+}
+
+# ── 2. Tableau OR avec reference fixe ────────────────────────────────────────
+tab_or_ref <- function(var, label, ref_level=NULL, data=df) {
+  d <- data %>%
+    filter(!is.na(.data[[var]]), !is.na(Porteur_BMR)) %>%
+    mutate(grp     = as.character(.data[[var]]),
+           outcome = as.integer(Porteur_BMR == "Porteur BMR"))
+
+  modalites <- sort(unique(d$grp))
+  if (length(modalites) < 2) return(invisible(NULL))
+
+  # Reference = premiere modalite ou celle specifiee
+  if (is.null(ref_level)) ref_level <- modalites[1]
+  # Garde-fou : si ref_level ne correspond a aucune modalite reelle (ex. accent
+  # manquant, apostrophe differente), on le detecte immediatement plutot que de
+  # creer silencieusement un niveau fantome a effectif 0 comme reference.
+  if (!(ref_level %in% modalites)) {
+    stop(sprintf(
+      "ref_level = '%s' introuvable pour la variable '%s'. Modalites disponibles : %s",
+      ref_level, var, paste(modalites, collapse=" | ")
+    ))
+  }
+  d$grp <- factor(d$grp, levels=c(ref_level, setdiff(modalites, ref_level)))
+
+  res_g <- test_global(var, data)
+  p_global_fmt <- if (is.na(res_g$p)) "NA" else
+                  if (res_g$p < 0.001) "< 0.001" else sprintf("%.3f", res_g$p)
+
+  # Regression logistique avec toutes les modalites
+  fit <- tryCatch(glm(outcome ~ grp, data=d, family=binomial()), error=function(e) NULL)
+
+  rows <- lapply(levels(d$grp), function(mod_i) {
+    n_tot  <- sum(d$grp == mod_i)
+    n_port <- sum(d$grp == mod_i & d$outcome == 1)
+    pct    <- round(n_port/n_tot*100, 1)
+
+    if (mod_i == ref_level) {
+      or_fmt <- "Reference"; ic_fmt <- "-"; p_fmt <- "-"; sig <- ""
+    } else if (!is.null(fit)) {
+      nm  <- paste0("grp", mod_i)
+      cf  <- tryCatch(coef(fit)[nm], error=function(e) NA)
+      se  <- tryCatch(summary(fit)$coefficients[nm,"Std. Error"], error=function(e) NA)
+      pv  <- tryCatch(summary(fit)$coefficients[nm,"Pr(>|z|)"], error=function(e) NA)
+      if (is.na(cf)) {
+        or_fmt <- "NE"; ic_fmt <- "-"; p_fmt <- "-"; sig <- ""
+      } else {
+        or_val <- exp(cf)
+        ci_l   <- exp(cf - 1.96*se)
+        ci_u   <- exp(cf + 1.96*se)
+        or_fmt <- sprintf("%.2f", or_val)
+        ic_fmt <- sprintf("[%.2f - %.2f]", ci_l, ci_u)
+        p_fmt  <- if (is.na(pv)) "-" else if (pv<0.001) "< 0.001" else sprintf("%.3f", pv)
+        sig    <- if (is.na(pv)) "" else if (pv<0.001) "p<0.001" else
+                  if (pv<0.01) "p<0.01" else if (pv<0.05) "p<0.05" else ""
+      }
+    } else {
+      or_fmt <- "NE"; ic_fmt <- "-"; p_fmt <- "-"; sig <- ""
+    }
+
+    data.frame(
+      Modalite = mod_i,
+      N_total  = n_tot,
+      Porteurs = sprintf("%d (%.1f%%)", n_port, pct),
+      OR_brut  = or_fmt,
+      IC95     = ic_fmt,
+      p_val    = p_fmt,
+      Sig      = sig,
+      stringsAsFactors = FALSE
+    )
+  })
+
+  tab <- do.call(rbind, rows)
+  note <- sprintf("Ref = %s  |  Test global (%s) p = %s",
+                  ref_level, res_g$test, p_global_fmt)
+
+  kable(tab, booktabs=TRUE, linesep="",
+        col.names=c("Modalite","N","Porteurs n(pct)","OR","IC 95pct","p","Sig"),
+        caption=paste0("Portage BMR selon ", label)) %>%
+    kable_styling(latex_options=c("hold_position","striped"),
+                  font_size=8, full_width=FALSE) %>%
+    row_spec(0, bold=TRUE) %>%
+    row_spec(1, background="#D5E8D4") %>%
+    add_footnote(note, notation="none")
+}
+
+# ── 3. Graphe barres (tous niveaux, reference en vert) ────────────────────────
+bar_bivar <- function(var, titre, ref_level=NULL, data=df) {
+  res  <- test_global(var, data)
+  subt <- if (is.na(res$p)) "p = NA" else sprintf("p %.3f (test %s)", res$p, res$test)
+
+  d_all <- data %>%
+    filter(!is.na(.data[[var]]), !is.na(Porteur_BMR)) %>%
+    mutate(grp = as.character(.data[[var]])) %>%
+    count(grp, Porteur_BMR) %>%
+    group_by(grp) %>%
+    mutate(total=sum(n), pct=n/sum(n)*100) %>% ungroup()
+
+  # Garde-fou : alerter si ref_level ne correspond a aucune modalite reelle
+  # (silencieusement, la barre de reference ne serait simplement jamais coloree en vert)
+  if (!is.null(ref_level) && !(ref_level %in% unique(d_all$grp))) {
+    warning(sprintf(
+      "bar_bivar('%s') : ref_level = '%s' introuvable. Modalites disponibles : %s",
+      var, ref_level, paste(unique(d_all$grp), collapse=" | ")
+    ))
+  }
+
+  d <- d_all %>%
+    filter(Porteur_BMR=="Porteur BMR") %>%
+    mutate(cat = str_wrap(grp, width=18),
+           is_ref = (!is.null(ref_level) & grp==ref_level))
+
+  grp_manq <- setdiff(unique(d_all$grp), unique(d_all$grp[d_all$Porteur_BMR=="Porteur BMR"]))
+  if (length(grp_manq)>0) {
+    d_z <- data.frame(grp=grp_manq, Porteur_BMR="Porteur BMR",
+                      n=0L, total=NA_integer_, pct=0, is_ref=FALSE,
+                      cat=str_wrap(grp_manq, width=18), stringsAsFactors=FALSE)
+    d <- bind_rows(d, d_z)
+  }
+  if (nrow(d)==0) return(ggplot()+labs(title=titre)+theme_faso)
+
+  d <- d %>% mutate(
+    cat   = fct_reorder(cat, pct, .desc=TRUE),
+    fill_col = ifelse(is_ref, "#27AE60",
+               ifelse(pct >= 40, "#C0392B",
+               ifelse(pct >= 30, "#E67E22", "#2980B9"))),
+    total_lbl = ifelse(!is.na(total), paste0("n=",total), "n=0")
+  )
+
+  ggplot(d, aes(x=cat, y=pct, fill=fill_col)) +
+    geom_col(show.legend=FALSE, width=0.6) +
+    geom_text(aes(label=paste0(round(pct,0),"pct")),
+              vjust=-0.45, size=2.9, fontface="bold") +
+    geom_text(aes(label=total_lbl),
+              vjust=1.5, size=2.3, color="white") +
+    scale_fill_identity() +
+    scale_y_continuous(limits=c(0,82), labels=function(x) paste0(x,"pct")) +
+    labs(title=titre, subtitle=subt, x=NULL, y="pct porteurs BMR") +
+    theme_faso +
+    theme(axis.text.x=element_text(angle=30, hjust=1, size=7.5))
+}
+```
+
+### 1.Analyse de l'âge continu
+
+Nous examinons d'abord si l'âge, seule variable continue de cette analyse, diffère entre porteurs et non-porteurs de BMR.La figure \ref{fig:fig-age-boxplot} illustre, sous forme de boîtes à moustaches complétées par les points individuels (jitter), la distribution de l'âge selon le statut de portage BMR ; elle permet de comparer visuellement la tendance centrale et la dispersion de l'âge entre porteurs et non-porteurs. 
+
+
+```{r age-continu, include=FALSE}
+# Test de normalite par groupe
+bmr_age <- df %>% filter(!is.na(AGE_NETTOYE), !is.na(Porteur_BMR)) %>%
+           mutate(groupe = as.character(Porteur_BMR))
+
+age_port  <- bmr_age$AGE_NETTOYE[bmr_age$groupe=="Porteur BMR"]
+age_nport <- bmr_age$AGE_NETTOYE[bmr_age$groupe=="Non porteur"]
+
+sw_port  <- shapiro.test(sample(age_port,  min(length(age_port),  5000)))
+sw_nport <- shapiro.test(sample(age_nport, min(length(age_nport), 5000)))
+normal_ok <- sw_port$p.value > 0.05 & sw_nport$p.value > 0.05
+
+# Test Student ou Mann-Whitney
+if (normal_ok) {
+  test_age <- t.test(AGE_NETTOYE ~ Porteur_BMR, data=bmr_age)
+  test_nom  <- "Student"
+} else {
+  test_age <- wilcox.test(AGE_NETTOYE ~ Porteur_BMR, data=bmr_age, exact=FALSE)
+  test_nom  <- "Mann-Whitney"
+}
+
+tab_age_grp <- bmr_age %>%
+  group_by(Porteur_BMR) %>%
+  summarise(
+    N      = n(),
+    Moyenne = sprintf("%.1f", mean(AGE_NETTOYE, na.rm=TRUE)),
+    ET      = sprintf("%.1f", sd(AGE_NETTOYE,   na.rm=TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate("Moyenne +/- ET" = paste0(Moyenne, " +/- ", ET))
+```
+
+```{r fig-age-boxplot, fig.cap="Distribution de l age selon le statut de portage BMR", fig.height=2.6}
+ggplot(bmr_age, aes(x=groupe, y=AGE_NETTOYE, fill=groupe)) +
+  geom_boxplot(width=0.4, outlier.size=1, alpha=0.8, show.legend=FALSE) +
+  geom_jitter(width=0.15, alpha=0.05, size=0.8) +
+  scale_fill_manual(values=c("Non porteur"=COL_VERT, "Porteur BMR"=COL_ROUGE)) +
+  labs(title="Distribution de l'âge selon le portage BMR",
+       subtitle=sprintf("Test %s : p %s", test_nom,
+                        ifelse(test_age$p.value<0.001,"< 0.001",
+                               sprintf("= %.3f", test_age$p.value))),
+       x=NULL, y="Age (annees)") +
+  theme_faso
+```
+
+```{r age-interp-txt, include=FALSE}
+moy_port  <- tab_age_grp[tab_age_grp$Porteur_BMR=="Porteur BMR",  "Moyenne +/- ET"]
+moy_nport <- tab_age_grp[tab_age_grp$Porteur_BMR=="Non porteur",  "Moyenne +/- ET"]
+sig_age   <- ifelse(test_age$p.value < 0.05,
+                    "statistiquement significative",
+                    "non statistiquement significative")
+p_age_fmt <- ifelse(test_age$p.value < 0.001, "< 0.001",
+                    sprintf("= %.3f", test_age$p.value))
+age_interp_txt <- sprintf(
+  paste0("L'âge moyen des porteurs de BMR est de %s ans contre %s ans",
+         " chez les non porteurs. Le test de %s montre que cette difference",
+         " est %s (p %s)."),
+  moy_port, moy_nport, test_nom, sig_age, p_age_fmt)
+```
+
+`r age_interp_txt`
+
+### 2.Analyse des variables catégorielles
+
+Pour chaque variable, un test d'association global (Chi2 ou Fisher) est realisé : le graphique réprésente le pourcentage de porteurs BMR par modalité (modalité de référence en vert). Le detail statistique complet (OR bruts, IC95%, p) est disponible en **Annexe A**.
+
+#### 2.1 Facteurs comportementaux et environnementaux
+
+Nous nous intéressons d'abord aux facteurs comportementaux et environnementaux susceptibles d'influencer le portage. La figure \ref{fig:panel-bivar-env} rassemble, pour cinq facteurs comportementaux et environnementaux (hygiène individuelle, qualité de l'eau, exposition aux antibiotiques, contact animal, environnement agricole), le pourcentage de porteurs BMR observé dans chaque modalité ; la modalité de référence est représentée en vert et l'effectif correspondant figure à la base de chaque barre. Elle montre que le risque de portage BMR augmente significativement avec une hygiène insuffisante (35% vs 25% en bonne hygiène ; OR=1,55 ; p<0,001), une qualité d'eau à risque modéré (38% vs 27% ; OR=1,71 ; p<0,001) et une exposition récente aux antibiotiques (44% vs 26% ; OR=2,19 ; p<0,001). L'absence de contact animal est associée, de façon contre-intuitive (contraire à ce que suggèrent des travaux déjà publiés), à une prévalence plus élevée (51% vs 27% en cas de contact modéré ; OR=0,35 ; p<0,001 — discuté en section V). L'environnement agricole n'est en revanche pas significativement associé au portage (33% vs 28% ; p=0,560).
+
+```{r panel-bivar-env, fig.cap="Portage BMR selon les facteurs comportementaux et environnementaux", fig.height=7.5, fig.width=7.5, out.width="95%"}
+p_hyg  <- bar_bivar("hyg",  "Hygiene",                ref_level="Bonne hygiène")
+p_eau  <- bar_bivar("eau",  "Qualite de l eau",       ref_level="Eau sure")
+p_atb  <- bar_bivar("atb",  "Exposition ATB",         ref_level="Pas d\u2019exposition")
+p_anim <- bar_bivar("anim", "Contact animal",         ref_level="Pas de contact")
+p_env  <- bar_bivar("env",  "Environnement agricole", ref_level="Pas d\u2019exposition")
+
+grid.arrange(p_hyg, p_eau, p_atb, p_anim, p_env, ncol=2)
+```
+
+
+#### 2.2 Facteurs sociodémographiques et médicaux
+
+Nous examinons à présent le rôle des caractéristiques sociodémographiques et médicales des patients. La figure \ref{fig:panel-bivar-socio} présente, selon le même principe, le pourcentage de porteurs BMR observé selon quatre caractéristiques sociodémographiques et médicales : le sexe, la tranche d'âge, le niveau d'éducation et la présence de comorbidités. Elle met en évidence un risque significativement accru chez les hommes (44% vs 27% ; OR=2,20 ; p<0,001), chez les patients de 50 ans et plus (49% ; OR=3,42 ; p<0,001) et de 35-49 ans (38% ; OR=2,21 ; p<0,001), ainsi que chez les porteurs de comorbidités (48% vs 22% ; OR=3,20 ; p<0,001). Le niveau d'éducation montre une association plus faible mais globalement significative (test Chi2, p=0,046), sans qu'aucune modalité individuelle n'atteigne p<0,05.
+
+```{r panel-bivar-socio, fig.cap="Portage BMR selon les facteurs sociodemographiques et medicaux", fig.height=6.0, fig.width=7.5, out.width="95%"}
+p_sexe  <- bar_bivar("sexe",        "Sexe",               ref_level="Femme")
+p_age   <- bar_bivar("tranche_age", "Tranche d age",      ref_level="20\u201334 ans")
+p_edu   <- bar_bivar("niveau_edu",  "Niveau d education", ref_level="Education secondaire")
+p_comor <- bar_bivar("comor",       "Comorbidites",       ref_level="Non")
+
+grid.arrange(p_sexe, p_age, p_edu, p_comor, ncol=2)
+```
+
+
+
+#### 2.3 Profession
+
+Enfin, nous étudions si la profession exercée par les participants influence le risque de portage. La figure \ref{fig:fig-bivar-prof} détaille le pourcentage de porteurs BMR selon la profession exercée, ce qui permet d'identifier les groupes professionnels les plus exposés. Elle révèle une forte hétérogénéité selon la profession (test de Fisher, p=0,003) : les travailleurs agricoles présentent le risque le plus élevé (63% de porteurs ; OR=4,31 ; IC95% [1,55-11,97] ; p<0,01), suivis des enseignants (46%) et des professionnels de santé (44%).
+
+```{r fig-bivar-prof, fig.cap="Portage BMR selon la profession", fig.width=12,fig.height=8.0}
+bar_bivar("profession", "Profession", ref_level="Autre")
+```
+
+
+### 3.Synthèse de l'analyse bivariée
+
+Sur la base d'un seuil de sélection à p < 0,20 (cf. tableau de synthèse complet en **Annexe A**), les onze variables explorées ci-dessus (âge, sexe, tranche d'âge, niveau d'éducation, profession, comorbidités, hygiène, qualité de l'eau, exposition aux antibiotiques, contact animal, environnement agricole) sont toutes retenues pour l'analyse multivariée présentée ci-après.
+
+
+## IV.Analyse multivariée - Régression logistique binaire
+
+### 1.Construction du modèle
+
+Après avoir identifié les facteurs associés au portage pris isolément, nous cherchons maintenant à déterminer lesquels demeurent significatifs une fois ajustés les uns sur les autres. Nous construisons pour cela le modèle de régression logistique multivariée.
+
+```{r modele}
+# ── Etape 1 : variables de base recodees ────────────────────────────────────
+df_mod <- df %>%
+  mutate(
+    hyg2 = case_when(
+      grepl("Bonne", as.character(classe_hygiene), ignore.case=TRUE) ~ "Bonne hygiene",
+      !is.na(classe_hygiene) ~ "Hygiene insuffisante",
+      TRUE ~ NA_character_),
+    eau2 = case_when(
+      grepl("sure", as.character(classe_eau), ignore.case=TRUE) ~ "Eau sure",
+      !is.na(classe_eau) ~ "Eau risque",
+      TRUE ~ NA_character_),
+    atb2 = case_when(
+      grepl("Pas", as.character(classe_exposition_atb), ignore.case=TRUE) ~ "Pas exposition",
+      !is.na(classe_exposition_atb) ~ "Exposition ATB",
+      TRUE ~ NA_character_),
+    anim2 = case_when(
+      grepl("Pas", as.character(classe_contact_animal), ignore.case=TRUE) ~ "Pas contact",
+      !is.na(classe_contact_animal) ~ "Contact animal",
+      TRUE ~ NA_character_),
+    env2 = case_when(
+      grepl("Pas", as.character(classe_env_agricole), ignore.case=TRUE) ~ "Pas exposition agri",
+      !is.na(classe_env_agricole) ~ "Exposition agricole",
+      TRUE ~ NA_character_),
+    edu2 = case_when(
+      grepl("scolar", as.character(niveau_edu), ignore.case=TRUE)         ~ "Aucune scolarisation",
+      grepl("primaire", as.character(niveau_edu), ignore.case=TRUE)        ~ "Education primaire",
+      grepl("secondaire", as.character(niveau_edu), ignore.case=TRUE)      ~ "Education secondaire",
+      grepl("univer|diplome", as.character(niveau_edu), ignore.case=TRUE)  ~ "Universitaire",
+      !is.na(niveau_edu)                                                    ~ "Autre",
+      TRUE ~ NA_character_),
+    tranche2 = case_when(
+      as.character(tranche_age) == "\u226419 ans"   ~ "Moins 20 ans",
+      as.character(tranche_age) == "20\u201334 ans" ~ "20-34 ans",
+      as.character(tranche_age) == "35\u201349 ans" ~ "35-49 ans",
+      !is.na(tranche_age)                           ~ "50 ans et plus",
+      TRUE ~ NA_character_),
+    sexe2  = as.character(FLAG_SEXE_INVALIDE),
+    # Profession regroupee
+    prof2  = case_when(
+      grepl("Sans profession", as.character(profession), ignore.case=TRUE)              ~ "Sans profession",
+      grepl("elementaire|foyer|enfant", as.character(profession), ignore.case=TRUE)     ~ "Prof. elementaires",
+      grepl("Vendeur", as.character(profession), ignore.case=TRUE)                      ~ "Vendeur",
+      grepl("Etudiant", as.character(profession), ignore.case=TRUE)                     ~ "Etudiant",
+      grepl("agricole|eleveur|defrichage", as.character(profession), ignore.case=TRUE)  ~ "Agriculteur",
+      grepl("sante|infirmier|medecin|veterinaire", as.character(profession), ignore.case=TRUE) ~ "Prof. sante",
+      !is.na(profession)                                                                  ~ "Autre",
+      TRUE ~ NA_character_),
+    # Comorbidites
+    comor2 = as.character(comor)
+  ) %>%
+  filter(
+    !is.na(outcome), !is.na(sexe2), !is.na(tranche2),
+    !is.na(edu2), !is.na(prof2), !is.na(comor2),
+    !is.na(hyg2), !is.na(eau2), !is.na(atb2),
+    !is.na(anim2), !is.na(env2)
+  ) %>%
+  mutate(
+    sexe2    = factor(sexe2),
+    tranche2 = factor(tranche2,
+                      levels = c("20-34 ans","Moins 20 ans","35-49 ans","50 ans et plus")),
+    edu2     = factor(edu2,
+                      levels = c("Education secondaire","Aucune scolarisation",
+                                 "Education primaire","Universitaire","Autre")),
+    prof2    = factor(prof2,
+                      levels = c("Autre","Sans profession","Prof. elementaires",
+                                 "Vendeur","Etudiant","Agriculteur","Prof. sante")),
+    comor2   = factor(comor2, levels = c("Non","Oui")),
+    hyg2     = factor(hyg2, levels = c("Bonne hygiene","Hygiene insuffisante")),
+    eau2     = factor(eau2, levels = c("Eau sure","Eau risque")),
+    atb2     = factor(atb2, levels = c("Pas exposition","Exposition ATB")),
+    anim2    = factor(anim2, levels = c("Contact animal","Pas contact")),
+    env2     = factor(env2,  levels = c("Exposition agricole","Pas exposition agri"))
+  ) %>%
+  droplevels()
+
+# ── Etape 2 : verification niveaux ──────────────────────────────────────────
+vars_check <- c("sexe2","tranche2","edu2","prof2","comor2",
+                "hyg2","eau2","atb2","anim2","env2")
+for (v in vars_check) {
+  niv <- nlevels(df_mod[[v]])
+  if (niv < 2) stop(paste("Variable", v, "n a qu un seul niveau:", niv))
+}
+
+n_mod      <- nrow(df_mod)
+n_mod_port <- sum(df_mod$outcome)
+
+# ── Etape 3 : modele ────────────────────────────────────────────────────────
+mod <- glm(
+  outcome ~ sexe2 + tranche2 + edu2 + prof2 + comor2 +
+            hyg2 + eau2 + atb2 + anim2 + env2,
+  data   = df_mod,
+  family = binomial(link = "logit")
+)
+```
+ 
+Le modèle est ajusté sur **`r n_mod` observations** (`r n_mod_port` porteurs et `r n_mod - n_mod_port` non porteurs) après exclusion des données manquantes.
+
+
+
+### 2.Vérification de la multicolinéarité (VIF) et OR ajustés
+
+Avant d'interpréter les coefficients du modèle, il est nécessaire de vérifier qu'aucune variable n'est redondante avec une autre. Nous examinons pour cela les facteurs d'inflation de la variance. 
+
+```{r vif-or-compute, include=FALSE}
+vif_res <- tryCatch(vif(mod), error=function(e) NULL)
+vif_max_val <- NA_real_; vif_max_var <- ""
+if (!is.null(vif_res)) {
+  if (is.matrix(vif_res)) {
+    col_gvif <- grep("1..2", colnames(vif_res), value=TRUE)
+    vif_num <- vif_res[, col_gvif]
+  } else { vif_num <- vif_res }
+  vif_max_val <- max(vif_num, na.rm=TRUE)
+  vif_max_var <- names(which.max(vif_num))
+}
+
+ci_raw <- confint.default(mod)
+coef_s <- summary(mod)$coefficients
+or_tab <- data.frame(
+  Variable=rownames(coef_s), OR=exp(coef(mod)),
+  IC_inf=exp(ci_raw[,1]), IC_sup=exp(ci_raw[,2]),
+  pval=coef_s[,"Pr(>|z|)"], stringsAsFactors=FALSE) %>%
+  filter(Variable!="(Intercept)")
+n_sig <- sum(or_tab$pval < 0.05)
+```
+
+Cette étape ne produit pas de tableau visible dans le corps du texte : elle consiste à vérifier, pour chaque variable du modèle, l'absence de colinéarité excessive avant d'interpréter les coefficients ajustés. L'inspection des facteurs d'inflation de la variance ne révèle aucune colinéarité préoccupante (VIF maximal = `r sprintf("%.2f", vif_max_val)`, largement inférieur au seuil de 5 ; détail par variable en **Annexe B**). Le modèle logistique multivarié, ajusté sur `r n_mod` observations, identifie **`r n_sig` variables** significativement associées au portage BMR après ajustement mutuel (seuil p < 0,05). Le détail complet des OR ajustés, IC95% et p-valeurs pour l'ensemble des `r nrow(or_tab)` modalités du modèle est disponible en **Annexe B** (Tableau B1) ; seules les variables significatives sont représentées graphiquement en section 5 ci-dessous.
+
+
+### 3.Validation du modèle
+
+Il reste à vérifier que le modèle retenu s'ajuste correctement aux données observées avant d'en tirer des conclusions. Nous mobilisons pour cela le test d'adéquation de Hosmer-Lemeshow. 
+
+```{r hosmer-diag-compute, include=FALSE}
+obs_used <- as.integer(model.response(model.frame(mod)))
+fit_used <- fitted(mod)
+hl <- hoslem.test(obs_used, fit_used, g=10)
+hl_interp <- sprintf(
+  "Le test de Hosmer-Lemeshow (Chi2 = %.2f ; ddl = %s ; p = %.3f) %s",
+  hl$statistic, as.character(hl$parameter), hl$p.value,
+  ifelse(hl$p.value > 0.05,
+    "indique une bonne adequation du modèle aux données observées.",
+    "suggère une adequation statistiquement imparfaite du modèle, limite discutée en section V."))
+```
+
+De la même façon, cette étape ne génère pas de tableau ou de graphique dans le corps du texte : elle vise à s'assurer que le modèle retenu s'ajuste correctement aux données observées avant d'en tirer des conclusions. `r hl_interp` L'analyse des résidus de Pearson et de déviance (**Annexe B**, Figure B1) ne révèle pas de structure systématique ni de valeurs aberrantes influentes, ce qui conforte la validité globale du modèle malgré cette limite statistique.
+
+
+### 4.Performance du modèle
+
+#### 4.1 Courbe ROC et AUC
+
+Afin d'évaluer la capacité globale du modèle à distinguer porteurs et non-porteurs, nous examinons à présent sa courbe ROC. La figure \ref{fig:fig-roc} présente la courbe ROC (Receiver Operating Characteristic) du modèle logistique final, qui met en relation la sensibilité et le complément de la spécificité pour l'ensemble des seuils de décision possibles ; le point bleu signale le seuil optimal selon l'indice de Youden, et l'aire sous la courbe (AUC) résume la capacité globale du modèle à distinguer porteurs et non-porteurs. 
+
+```{r fig-roc, fig.cap="Courbe ROC du modele logistique", fig.height=3.2}
+# Verifier qu'on a les deux classes
+obs_mod <- as.integer(model.response(model.frame(mod)))
+fit_mod <- fitted(mod)
+if (length(unique(obs_mod)) < 2) {
+  cat("Impossible de tracer la courbe ROC : la variable outcome ne contient qu'une seule classe.")
+} else {
+  roc_obj <- roc(obs_mod, fit_mod, quiet=TRUE)
+  auc_val <- auc(roc_obj)
+  ci_auc  <- ci.auc(roc_obj)
+  best_pt <- coords(roc_obj, "best",
+                    ret=c("threshold","specificity","sensitivity"))
+  best_c  <- best_pt$threshold[1]
+  best_sp <- best_pt$specificity[1]
+  best_se <- best_pt$sensitivity[1]
+
+  roc_df <- data.frame(spec=1-roc_obj$specificities,
+                       sens=roc_obj$sensitivities)
+
+  print(
+    ggplot(roc_df, aes(x=spec, y=sens)) +
+      geom_ribbon(aes(ymin=0, ymax=sens), fill=COL_ROUGE, alpha=0.08) +
+      geom_line(color=COL_ROUGE, linewidth=1.2) +
+      geom_abline(slope=1, intercept=0, linetype="dashed",
+                  color="grey60", linewidth=0.7) +
+      geom_point(data=data.frame(x=1-best_sp, y=best_se),
+                 aes(x=x, y=y), color="#2471A3", size=4,
+                 shape=18, inherit.aes=FALSE) +
+      annotate("text", x=1-best_sp+0.10, y=best_se-0.06,
+               label=sprintf("Seuil optimal\n= %.2f", best_c),
+               size=3, color="#2471A3", fontface="bold") +
+      annotate("text", x=0.62, y=0.16,
+               label=sprintf("AUC = %.3f\nIC 95%% [%.3f - %.3f]",
+                             auc_val, ci_auc[1], ci_auc[3]),
+               size=4, fontface="bold", color=COL_ROUGE) +
+      scale_x_continuous(limits=c(0,1), labels=percent_format()) +
+      scale_y_continuous(limits=c(0,1), labels=percent_format()) +
+      labs(title="Courbe ROC - Modele logistique",
+           subtitle="Capacite discriminante du modele",
+           x="1 - Specificite (taux faux positifs)",
+           y="Sensibilite (taux vrais positifs)") +
+      theme_faso
+  )
+}
+```
+
+```{r roc-interp-txt, include=FALSE}
+roc_interp <- if (length(unique(obs_mod)) >= 2) {
+  qualite <- if (auc_val >= 0.8) "excellent" else if (auc_val >= 0.7) "bon" else "acceptable"
+  sprintf(paste0(
+    "L'AUC du modèle est de %.3f (IC 95 pct : [%.3f - %.3f]).",
+    " Cette valeur indique un %s pouvoir discriminant du modèle.",
+    " La courbe ROC s'éloigne nettement de la diagonale,",
+    " confirmant que le modèle discrimine mieux qu'un modèle aleatoire.",
+    " Le seuil optimal de Youden (= %.2f) maximise simultanement",
+    " la sensibilite et la spécificité."),
+    auc_val, ci_auc[1], ci_auc[3], qualite, best_c)
+} else { "Courbe ROC non disponible." }
+```
+
+`r roc_interp`
+
+#### 4.2 Indicateurs de classification
+
+En complément de la courbe ROC, nous quantifions à présent la performance du modèle à son seuil de décision optimal. Aucun tableau n'est affiché dans le corps du texte pour cette partie : les indicateurs de classification (sensibilité, spécificité, VPP, VPN, précision) sont calculés à partir de la matrice de confusion obtenue au seuil optimal et détaillés en **Annexe B** (Tableau B2). 
+
+```{r tab-classif, include=FALSE}
+if (length(unique(obs_mod))>=2) {
+  pred <- ifelse(fit_mod >= best_c, 1, 0)
+  obs  <- obs_mod
+  TN <- sum(obs==0 & pred==0); FP <- sum(obs==0 & pred==1)
+  FN <- sum(obs==1 & pred==0); TP <- sum(obs==1 & pred==1)
+  sensib <- TP/(TP+FN); specif <- TN/(TN+FP)
+  vpp    <- TP/(TP+FP); vpn    <- TN/(TN+FN)
+  precis <- (TP+TN)/(TP+TN+FP+FN)
+}
+```
+
+```{r classif-interp-txt, include=FALSE}
+classif_interp <- if (length(unique(obs_mod)) >= 2) {
+  sprintf(paste0(
+    "Au seuil optimal de Youden (= %.2f), le modèle classifie",
+    " correctement %.1f pct des porteurs (sensibilité)",
+    " et %.1f pct des non-porteurs (specificité).",
+    " La précision globale de %.1f pct indique que le modèle",
+    " prédit correctement le statut de portage dans %.1f pct des cas.",
+    " La VPP de %.1f pct signifie que %.1f pct des individus",
+    " classes comme porteurs le sont réellement.",
+    " La VPN de %.1f pct indique que %.1f pct des individus",
+    " classes comme non-porteurs ne le sont effectivement pas."),
+    best_c,
+    sensib*100, specif*100,
+    precis*100, precis*100,
+    vpp*100, vpp*100,
+    vpn*100, vpn*100)
+} else { "Classification non disponible." }
+```
+
+`r classif_interp`
+
+### 5.Synthèse de l'analyse multivariée
+
+Pour conclure cette analyse multivariée, nous synthétisons visuellement les facteurs qui demeurent significativement associés au portage une fois ajustés les uns sur les autres.La figure \ref{fig:synthese-multi-plot} présente, sous forme de forest plot, les odds ratios ajustés  avec leur intervalle de confiance à 95 %  des variables demeurant significativement associées au portage BMR après ajustement mutuel dans le modèle multivarié. L'axe des abscisses est représenté en échelle logarithmique ; les points rouges (OR > 1) signalent un facteur de risque et les points verts (OR < 1) un facteur protecteur, la ligne pointillée verticale marquant la valeur neutre (OR = 1).
+
+
+
+```{r synthese-multivariee, include=FALSE}
+# Tableau detaille de synthese (OR, IC95%, role, force) deplace en Annexe B
+ci_s   <- confint.default(mod)
+coef_s <- summary(mod)$coefficients
+
+synth_multi <- data.frame(
+  Variable = rownames(coef_s),
+  OR       = exp(coef(mod)),
+  IC_inf   = exp(ci_s[,1]),
+  IC_sup   = exp(ci_s[,2]),
+  pval     = coef_s[,"Pr(>|z|)"],
+  stringsAsFactors = FALSE
+) %>%
+  filter(Variable != "(Intercept)") %>%
+  mutate(
+    Var_label = gsub("sexe2|tranche2|edu2|prof2|comor2|hyg2|eau2|atb2|anim2|env2",
+                     "", Variable),
+    OR_fmt  = sprintf("%.2f", OR),
+    IC_fmt  = sprintf("[%.2f - %.2f]", IC_inf, IC_sup),
+    p_fmt   = ifelse(pval < 0.001, "< 0.001", sprintf("%.3f", pval)),
+    Signif  = case_when(
+      pval < 0.001 ~ "Tres fort (p<0.001)",
+      pval < 0.01  ~ "Fort (p<0.01)",
+      pval < 0.05  ~ "Significatif (p<0.05)",
+      TRUE         ~ "NS"),
+    Direction = case_when(
+      pval >= 0.05 ~ "-",
+      OR > 1       ~ "Facteur de RISQUE",
+      OR < 1       ~ "Facteur PROTECTEUR",
+      TRUE         ~ "-")
+  ) %>%
+  arrange(pval) %>%
+  select(Var_label, OR_fmt, IC_fmt, p_fmt, Direction, Signif) %>%
+  rename(Variable=Var_label, "OR ajuste"=OR_fmt, "IC 95%"=IC_fmt,
+         "p-valeur"=p_fmt, "Role"=Direction, "Force"=Signif)
+```
+
+```{r synthese-multi-plot, fig.cap="Variables independamment associees au portage BMR (OR ajustes, p<0.05)", fig.height=4.0, include=TRUE}
+# ── Donnees du modele ────────────────────────────────────────────────────────
+ci_s_p   <- confint.default(mod)
+coef_s_p <- summary(mod)$coefficients
+
+# ── synth_plot : variables significatives uniquement ─────────────────────────
+synth_plot <- data.frame(
+  Variable = rownames(coef_s_p),
+  OR       = exp(coef(mod)),
+  IC_inf   = exp(ci_s_p[,1]),
+  IC_sup   = exp(ci_s_p[,2]),
+  pval     = coef_s_p[,"Pr(>|z|)"],
+  stringsAsFactors = FALSE
+) %>%
+  filter(Variable != "(Intercept)", pval < 0.05) %>%
+  mutate(
+    Var_label = gsub("sexe2|tranche2|edu2|prof2|comor2|hyg2|eau2|atb2|anim2|env2",
+                     "", Variable),
+    Direction = ifelse(OR > 1, "Facteur de risque", "Facteur protecteur"),
+    Var_label = fct_reorder(Var_label, OR)
+  )
+
+# ── synth_txt : texte d interpretation ───────────────────────────────────────
+if (nrow(synth_plot) == 0) {
+  synth_txt <- "Aucune variable n atteint le seuil de 5 pourcent apres ajustement."
+} else {
+  sig_risk <- synth_plot %>% filter(OR > 1) %>% arrange(desc(OR))
+  sig_prot <- synth_plot %>% filter(OR < 1) %>% arrange(OR)
+  txt <- ""
+  if (nrow(sig_risk) > 0) {
+    items <- paste(
+      sprintf("%s (OR=%.2f, p=%s)",
+              as.character(sig_risk$Var_label), sig_risk$OR,
+              ifelse(sig_risk$pval < 0.001, "p<0.001",
+                     sprintf("p=%.3f", sig_risk$pval))),
+      collapse=", ")
+    txt <- paste0("Facteurs de risque independants : ", items, ".")
+  }
+  if (nrow(sig_prot) > 0) {
+    items2 <- paste(
+      sprintf("%s (OR=%.2f, p=%s)",
+              as.character(sig_prot$Var_label), sig_prot$OR,
+              ifelse(sig_prot$pval < 0.001, "p<0.001",
+                     sprintf("p=%.3f", sig_prot$pval))),
+      collapse=", ")
+    txt <- paste0(txt, " Facteurs protecteurs : ", items2, ".")
+  }
+  synth_txt <- txt
+}
+
+# ── Graphe forest plot filtre ─────────────────────────────────────────────────
+if (nrow(synth_plot) == 0) {
+  cat("Aucune variable significative au seuil 5 pourcent.")
+} else {
+  print(
+    ggplot(synth_plot, aes(x=OR, y=Var_label, color=Direction)) +
+      geom_vline(xintercept=1, linetype="dashed", color="grey50", linewidth=0.7) +
+      geom_errorbarh(aes(xmin=pmax(IC_inf, 0.1), xmax=pmin(IC_sup, 15)),
+                     height=0.3, linewidth=1.0) +
+      geom_point(size=4) +
+      geom_text(aes(label=sprintf("OR=%.2f", OR)),
+                hjust=-0.2, size=2.8, color="black") +
+      scale_color_manual(
+        values=c("Facteur de risque"=COL_ROUGE, "Facteur protecteur"=COL_VERT),
+        name=NULL) +
+      scale_x_log10(limits=c(0.1, 20),
+                    breaks=c(0.1, 0.25, 0.5, 1, 2, 5, 10),
+                    labels=c("0.1","0.25","0.5","1","2","5","10")) +
+      labs(title="Facteurs independamment associes au portage BMR",
+           subtitle="Variables significatives (p < 0.05) - OR ajustes IC 95pct",
+           x="OR ajuste (echelle log)", y=NULL) +
+      theme_faso +
+      theme(legend.position="bottom")
+  )
+}
+```
+
+**Synthèse des facteurs explicatifs du portage BMR :**
+
+`r synth_txt`
+
+Ces associations, établies après ajustement mutuel sur l'ensemble des covariables, répresentent les determinants **independants** du portage digestif des BMR dans la population étudiée à Bobo-Dioulasso. Le tableau complet des `r nrow(synth_multi)` modalités testées (OR, IC95%, rôle, force d'association) figure en **Annexe B** (Tableau B3).
+
+## III.Conclusion de l'analyse
+
+L'analyse a porté sur **`r N` participants** inclus dans l'étude Faso RAM a Bobo-Dioulasso. La prévalence du portage digestif de BMR est de **`r sprintf("%.1f%%",prev*100)`** (IC 95% : [`r sprintf("%.1f%%",prev_l*100)` - `r sprintf("%.1f%%",prev_u*100)`]), répresentant une charge importante dans la population étudiée.
+
+*Escherichia coli* est le micro-organisme le plus fréquemment isolé (65.9%), avec une prédominance du phénotype BLSE (80.2%), confirmant la diffusion des enterobacteries productrices de beta-lactamases à spectre étendu dans le contexte de Bobo-Dioulasso.
+
+Le modèle logistique multivarié, ajusté sur 1743 observations, intègre des déterminants sociodémographiques (sexe, tranche d'âge, niveau d'éducation, profession, comorbidités) et environnementaux (hygiène individuelle, qualité de l'eau, exposition aux antibiotiques, contact animal, environnement agricole). Il présente un pouvoir discriminant acceptable (AUC = 0,686 ; IC 95 % [0,658 – 0,714]), mais une adéquation statistiquement imparfaite aux données selon le test de Hosmer-Lemeshow (p = 0,033), limite discutée en section VI.
+
+Ces résultats plaident pour des interventions ciblées sur les determinants identifiés dans une approche integrée *"Une seule sante"*, en particulier sur l'hygiène individuelle, la qualité de l'eau et l'utilisation raisonnée des antibiotiques en médecine humaine et véterinaire.
+
+## IV.Discussion
+
+La prévalence du portage digestif des bactéries multirésistantes aux antibiotiques (BMR) observée dans notre étude est de 28,1 % (IC 95 % : [26,0 % – 30,2 %]) chez les patients à Bobo-Dioulasso.Ce taux, bien qu'important, demeure inférieur à ceux rapportés en milieu rural burkinabè, où Valia et al. ont documenté une prévalence de 61,3 % d'entérobactéries productrices de BLSE en population communautaire [@valiaFaecalColonizationExtendedspectrum2026], et à celui retrouvé dans les jardins maraîchers de Ouagadougou (65,2 %) [@diarraOneHealthApproach2024]. Cette différence s'explique vraisemblablement par la nature hospitalière et semi-urbaine de notre population, plus exposée aux mesures d'hygiène institutionnelles que les communautés rurales ou agricoles. En accord avec la méta-analyse de Tiendrebeogo et al., qui rapporte une prévalence de 60,01 % dans les sources environnementales au Burkina Faso [@tiendrebeogoPrevalenceEnterobacteralesProducing2026], nos résultats confirment néanmoins l'ampleur préoccupante de la circulation des BMR à tous les niveaux de la chaîne épidémiologique.
+
+*Escherichia coli* constitue le micro-organisme le plus fréquemment isolé (65,9 %), avec une nette prédominance du phénotype BLSE (80,2 %), résultat cohérent avec ceux de Garba et al. qui, dans cinq hôpitaux du Burkina Faso, identifiaient *E. coli* et *Klebsiella* spp. comme espèces dominantes parmi les porteurs fécaux, avec 2,9 % de carbapénémase et des taux de co-résistance aux fluoroquinolones atteignant 82 % [@garbaFecalCarriageCarbapenemase2025]. La détection de souches productrices de carbapénémases dans notre étude appelle à une vigilance renforcée, car ces résistances compromettent les dernières options thérapeutiques disponibles.
+
+L'analyse bivariée identifie l'hygiène individuelle insuffisante, la qualité de l'eau, l'exposition aux antibiotiques et le contact avec les animaux comme facteurs significativement associés au portage. Ces résultats s'inscrivent dans le cadre conceptuel « Une seule santé », qui reconnaît l'interdépendance des réservoirs humain, animal et environnemental dans la dissémination des résistances [@ouedraogoEmergenceSpreadAntibiotic2017]. Le résultat de l'association avec le contact animal obtenu est inverse  aux résultats de Konkobo et al. dans les fermes avicoles de Bobo-Dioulasso, où 19,07 % des entérobactéries isolées étaient multirésistantes, avec des profils de résistance similaires entre éleveurs, volailles et eaux d'abreuvement, suggérant une transmission intersectorielle active [@konkoboPrevalenceEnterobacteriesMultiresistantes2026].L'association inverse observée ici peut s'expliquer par plusieurs facteurs. D'abord, le sous-groupe « pas de contact » est de faible effectif (n=78) comparé à « contact modéré » (n=1670), ce qui rend l'estimation instable malgré sa significativité. Ensuite, dans une population très majoritairement urbaine (96,3%), l'absence de contact animal peut être un marqueur indirect d'un mode de vie plus urbain et hospitalier, davantage exposé à la transmission interhumaine (soins de santé, densité de population) qu'à la transmission zoonotique. Enfin, ce résultat pourrait refléter une confusion résiduelle non contrôlée par le modèle (urbanité, fréquentation des structures de santé) plutôt qu'un véritable effet protecteur du contact animal, hypothèse déjà évoquée dans la littérature sous l'angle de « l'hygiène hypothesis ». Ce résultat doit donc être interprété avec prudence et mérite d'être exploré par des études complémentaires stratifiées selon le milieu de résidence. Par ailleurs, la sensibilité à l'hygiène des mains et à la qualité de l'eau rejoint les constats de Valia et al., qui documentaient une prévalence de portage significativement plus élevée chez les individus ne se lavant pas les mains avec du savon avant les repas [@valiaFaecalColonizationExtendedspectrum2026].
+
+Enfin, la performance discriminante du modèle multivarié (AUC = 0,686 ; IC 95 % [0,658 – 0,714]) indique une capacité acceptable, bien que modérée, à identifier les individus à risque. Le test de Hosmer-Lemeshow (p = 0,033) suggère par ailleurs une adéquation statistiquement imparfaite du modèle, ce qui invite à interpréter ces résultats avec une certaine prudence. Ces réserves méthodologiques ne remettent cependant pas en cause la pertinence des déterminants identifiés pour orienter des interventions ciblées. Des stratégies combinant l'éducation à l'hygiène, la gestion raisonnée des antibiotiques en médecine humaine et vétérinaire, et la surveillance intégrée des BMR demeurent indispensables pour contenir leur diffusion à Bobo-Dioulasso et dans l'ensemble du Burkina Faso [3], [4].
+
+
+## V.Apport décisionnel de l'analyse
+
+Les résultats de cette étude fournissent des informations directement exploitables
+pour orienter les décisions des acteurs de santé publique à Bobo-Dioulasso et
+au niveau national. Plusieurs recommandations concrètes peuvent être formulées.
+
+### 1.Renforcement des mesures d'hygiène individuelle et collective
+
+L'hygiène insuffisante est identifiée comme facteur de risque indépendant du
+portage BMR (OR ajusté = 1,33 ; p = 0,020). Cette association justifie le
+renforcement des programmes d'éducation à l'hygiène dans les structures de
+soins, notamment le lavage systématique des mains avec du savon, l'amélioration
+de l'accès à des latrines privatives et la sensibilisation à la gestion des
+excréments. Ces actions devraient être intégrées dans les plans de prévention
+des infections (PCI) au sein des centres de santé de Bobo-Dioulasso.
+
+### 2.Surveillance et bon usage des antibiotiques
+
+L'exposition aux antibiotiques est associée à un risque accru de portage
+(OR ajusté = 1,64 ; p = 0,004). Ce résultat souligne la nécessité de renforcer
+la politique de bon usage des antibiotiques (*antimicrobial stewardship*)
+dans les établissements de santé : prescription basée sur l'antibiogramme,
+limitation de l'automédication et formation des prescripteurs aux bonnes
+pratiques. Les données issues de cette étude peuvent alimenter les comités
+de bon usage des antibiotiques (COMAI) au niveau local.
+
+### 3.Prise en charge renforcée des patients avec comorbidités
+
+Les comorbidités multiplient par 1,70 le risque de portage (p = 0,004).
+Les patients présentant des antécédents médicaux doivent faire l'objet d'un
+dépistage renforcé du portage digestif de BMR à l'admission, et bénéficier de
+mesures de précautions contact adaptées pour limiter la transmission croisée
+au sein des structures de soins.
+
+### 4.Surveillance renforcée selon l'âge et le sexe
+
+Les hommes (OR = 1,54) et les patients de 35 ans et plus sont
+significativement plus à risque. Ces données permettent de définir des
+profils de patients prioritaires pour le dépistage du portage BMR,
+optimisant ainsi l'allocation des ressources de surveillance.
+
+### 5.Approche *Une seule santé* et interface homme-animal
+
+L'absence de contact avec les animaux ressort comme le facteur le plus
+fortement associé au portage (OR = 2,47 ; p < 0,001) résultat
+contre-intuitif qui suggère que les individus sans contact animal sont en
+réalité ceux dont les expositions urbaines (contacts humains denses,
+environnement hospitalier) prédominent. Ce constat renforce la nécessité
+d'une surveillance intégrée à l'interface homme-animal-environnement,
+impliquant les éleveurs, les vétérinaires et les équipes de santé publique
+dans un dispositif de veille coordonnée.
+
+### 6.Mise en place d'un tableau de bord de surveillance
+
+Les scripts R reproductibles développés au cours de ce stage constituent une
+base technique permettant de mettre en place un tableau de bord automatisé
+de surveillance du portage BMR au Centre MURAZ. Ce système, alimenté
+régulièrement par les données de l'étude FASO RAM, permettrait de suivre
+les tendances de la résistance dans le temps, d'alerter sur les émergences
+et de produire des rapports standardisés à destination des décideurs.

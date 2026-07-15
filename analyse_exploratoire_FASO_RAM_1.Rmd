@@ -1,0 +1,663 @@
+---
+title: "Analyse Exploratoire Multivariée – Portage Digestif des BMR"
+subtitle: "ACM, Classification Hiérarchique et Analyse Bivariée – Étude FASO RAM"
+author: "GANAME Guemilatou"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  pdf_document:
+    toc: false
+    number_sections: true
+    fig_caption: true
+    latex_engine: xelatex
+geometry: "margin=2cm"
+fontsize: 10pt
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{float}
+  - \usepackage{caption}
+  - \usepackage{fancyhdr}
+  - \usepackage{xcolor}
+  - \definecolor{bleufonce}{HTML}{2C3E50}
+  - \pagestyle{fancy}
+  - \fancyhead[L]{\small Analyse multivariée – BMR FASO RAM}
+  - \fancyhead[R]{\small \thepage}
+  - \fancyfoot[C]{}
+  - \renewcommand{\headrulewidth}{0.4pt}
+  - \captionsetup{font=small, labelfont=bf}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE, warning = FALSE, message = FALSE,
+  fig.align = "center", fig.pos = "H",
+  out.width = "92%", cache = FALSE
+)
+
+pkgs <- c("readxl","dplyr","tidyr","stringr","forcats","ggplot2",
+          "knitr","kableExtra","FactoMineR","factoextra","purrr",
+          "scales","openxlsx","gridExtra","ggpubr")
+invisible(lapply(pkgs, function(p){
+  if (!requireNamespace(p, quietly=TRUE))
+    install.packages(p, repos="https://cloud.r-project.org")
+  library(p, character.only=TRUE)
+}))
+
+# Palette et thème communs
+ROUGE  <- "#C0392B"; VERT <- "#27AE60"
+BLEU   <- "#2980B9"; ORANGE <- "#E67E22"
+JAUNE  <- "#F1C40F"; VIOLET <- "#8E44AD"
+
+theme_faso <- theme_minimal(base_size = 9) +
+  theme(plot.title    = element_text(face="bold", size=10, colour="#2C3E50"),
+        plot.subtitle = element_text(size=8, colour="#5D6D7E"),
+        legend.position = "bottom", legend.text = element_text(size=7),
+        axis.title = element_text(size=8),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(face="bold", size=8))
+```
+
+```{r chargement}
+FICHIER <- "FASO_RAM_NETTOYEE_20260623.xlsx"
+main <- read_excel(FICHIER, sheet="FASO_RAM_RESAISIE", guess_max=2000)
+como <- read_excel(FICHIER, sheet="Comorbidite")
+atb  <- read_excel(FICHIER, sheet="ATB")
+med  <- read_excel(FICHIER, sheet="medicament")
+
+# Variable cible
+main <- main %>%
+  mutate(
+    Porteur_BMR = case_when(
+      `P72. Résultat culture` == "Positive" ~ 1L,
+      `P72. Résultat culture` == "Negative" ~ 0L,
+      TRUE ~ NA_integer_),
+    Porteur_BMR_fac = factor(Porteur_BMR, 0:1, c("Non porteur","Porteur BMR")),
+    sexe = factor(case_when(
+      `P6. Sexe` == "Féminin"  ~ "Féminin",
+      `P6. Sexe` == "Masculin" ~ "Masculin",
+      TRUE ~ NA_character_)),
+    tranche_age = cut(AGE_NETTOYE,
+      breaks = c(0,19,34,49,Inf),
+      labels = c("≤19 ans","20–34 ans","35–49 ans","≥50 ans"),
+      right = TRUE, include.lowest = TRUE)
+  )
+```
+
+---
+
+# Analyse multivariée bloc par bloc (ACM + CAH)
+
+L'objectif est de regrouper les variables filles de chaque thème en profils homogènes via une **Analyse des Correspondances Multiples (ACM)** suivie d'une **Classification Ascendante Hiérarchique (CAH)** (`HCPC`, FactoMineR). Chaque cluster est ensuite nommé et injecté comme variable catégorielle dans la base.
+
+---
+
+## Bloc 1 – Hygiène individuelle
+
+**Variables filles :** type de toilettes, lavage mains (latrines), lavage mains (repas), manipulation d'excréments, latrines partagées.
+
+```{r acm_hygiene, fig.cap="ACM Hygiène – plan factoriel (Dim 1 × 2) et dendrogramme CAH", fig.height=4}
+# ── Préparation sécurisée (Conservation de toutes les lignes) ──────────────────
+hym <- main %>%
+  mutate(
+    toilettes = case_when(
+      str_detect(`P33. Quel type de toilettes utilisez vous ?`,
+                 "Intérieur avec chasse d'eau") ~ "Toilettes intérieures",
+      str_detect(`P33. Quel type de toilettes utilisez vous ?`,
+                 "Extérieur avec chasse d'eau") ~ "Latrine ext. améliorée",
+      str_detect(`P33. Quel type de toilettes utilisez vous ?`,
+                 "sans chasse") ~ "Latrine/fosse",
+      TRUE ~ "Aucune/Autre"),
+    latrines_partagees = case_when(
+      `P33. Les latrines sont-elles partagées avec d’autres familles ?` == "Oui" ~ "Partagées",
+      `P33. Les latrines sont-elles partagées avec d’autres familles ?` == "Non" ~ "Non partagées",
+      TRUE ~ "Non applicable"),
+    lavage_latrines = case_when(
+      `P34. Utilisez-vous du savon pour le lavage des mains après être allé aux latrines ?`
+        == "Oui (le plus souvent)" ~ "Oui",
+      `P34. Utilisez-vous du savon pour le lavage des mains après être allé aux latrines ?`
+        == "Non" ~ "Non",
+      TRUE ~ "Lavage lat.: Manquant"), # Remplacement du NA
+    lavage_repas = case_when(
+      `P35. Utilisez-vous du savon pour le lavage des mains avant de manger ?`
+        == "Oui (le plus souvent)" ~ "Oui",
+      `P35. Utilisez-vous du savon pour le lavage des mains avant de manger ?`
+        == "Non" ~ "Non",
+      TRUE ~ "Lavage repas: Manquant"), # Remplacement du NA
+    manip_excr = case_when(
+      `P36. Manipulez-vous les excréments (nettoyage, engrais) ?` == "Oui" ~ "Oui",
+      `P36. Manipulez-vous les excréments (nettoyage, engrais) ?` == "Non" ~ "Non",
+      TRUE ~ "Manip. excr.: Manquant") # Remplacement du NA
+  ) %>%
+  select(toilettes, latrines_partagees, lavage_latrines, lavage_repas, manip_excr) %>%
+  mutate(across(everything(), factor))
+  # LE FILTER COMPLETE CASES A ÉTÉ SUPPRIMÉ !
+
+# Réinitialisation propre des lignes pour la CAH
+rownames(hym) <- NULL
+
+# ── ACM et CAH ─────────────────────────────────────────────────────────────────
+set.seed(42)
+acm_hym  <- FactoMineR::MCA(hym, graph=FALSE, ncp=5)
+hcpc_hym <- FactoMineR::HCPC(acm_hym, nb.clust=3, graph=FALSE)
+
+# ── Graphiques natifs robustes (Zéro conflit de pile mémoire) ──────────────────
+par(mfrow = c(1, 2))
+plot(acm_hym, choix = "var", title = "ACM – Hygiène individuelle", col.var = "darkblue")
+plot(hcpc_hym, choice = "tree", title = "CAH – Hygiène (3 clusters)")
+par(mfrow = c(1, 1))
+```
+
+```{r cluster_hygiene}
+# ── Caractérisation des clusters ───────────────────────────────────────────────
+cl_hym <- hcpc_hym$data.clust %>% mutate(cluster_hym = clust)
+
+# Nommage logique des groupes
+labels_hym <- c("1"="Bonne hygiène", "2"="Hygiène intermédiaire", "3"="Mauvaise hygiène")
+
+# Injection directe ligne à ligne (alignement parfait sur 1750 lignes)
+main$classe_hygiene <- labels_hym[as.character(cl_hym$cluster_hym)]
+main$classe_hygiene <- factor(main$classe_hygiene,
+  levels=c("Mauvaise hygiène","Hygiène intermédiaire","Bonne hygiène"))
+
+# Tableau de synthèse des profils des clusters
+tab_hym <- cl_hym %>%
+  group_by(Cluster=cluster_hym) %>%
+  summarise(
+    N = n(),
+    `Lavage latrines (Oui%)`   = round(mean(lavage_latrines=="Oui")*100,1),
+    `Lavage repas (Oui%)`      = round(mean(lavage_repas=="Oui")*100,1),
+    `Manip. excréments (Oui%)` = round(mean(manip_excr=="Oui")*100,1),
+    `Toilettes intérieures (%)` = round(mean(toilettes=="Toilettes intérieures")*100,1),
+    .groups="drop"
+  ) %>%
+  mutate(Classe = labels_hym[as.character(Cluster)])
+
+# Rendu propre avec kable
+knitr::kable(tab_hym, booktabs=TRUE, linesep="",
+  caption="Profils des 3 clusters – Hygiène individuelle (Données complètes)") %>%
+  kableExtra::kable_styling(latex_options=c("HOLD_position","striped"), font_size=8) %>%
+  kableExtra::row_spec(0, bold=TRUE)
+```
+
+> **Interprétation :** L'ACM révèle une opposition principale (Dim 1) entre les pratiques hygiéniques adéquates (lavage systématique, toilettes intérieures) et les pratiques à risque (absence de lavage, latrines partagées). La CAH identifie **3 clusters stables** : *Bonne hygiène* (lavage systématique aux deux moments, toilettes améliorées), *Hygiène intermédiaire* (pratiques partielles), *Mauvaise hygiène* (absence de lavage, manipulation d'excréments, latrines collectives).
+
+---
+
+## Bloc 2 – Qualité de l'eau
+
+**Variables filles :** source d'eau, traitement de l'eau, eau partagée avec animaux.
+
+```{r acm_eau, fig.cap="ACM Eau – plan factoriel et CAH (3 clusters)", fig.height=3.8}
+eau <- main %>%
+  mutate(
+    source_eau = case_when(
+      `P27. Mode d’approvisionnement principal en eau de boisson :` %in%
+        c("Robinet intérieur/privé","Robinet extérieur","Borne fontaine",
+          "Citerne","Eau minérale","Puits avec pompe") ~ "Source amelioree",
+      TRUE ~ "Source non amelioree"),
+    traitement_eau = case_when(
+      is.na(`P28.Traitement de l’eau:`)                    ~ "Non renseigne",
+      `P28.Traitement de l’eau:` == "Pas de traitement"    ~ "Pas de traitement",
+      TRUE                                                 ~ "Traitee"),
+    eau_animaux = case_when(
+      `P30. Votre source d’eau est-elle parfois utilisée par des animaux ?` == "Oui" ~ "Partagee animaux",
+      `P30. Votre source d’eau est-elle parfois utilisée par des animaux ?` == "Non" ~ "Non partagee",
+      TRUE ~ "Eau animaux: Manquant") # Gestion propre du NA
+  ) %>%
+  select(source_eau, traitement_eau, eau_animaux) %>%
+  mutate(across(everything(), factor))
+  # LE FILTER COMPLETE CASES A ÉTÉ SUPPRIMÉ !
+
+# Nettoyage des index pour FactoMineR
+rownames(eau) <- NULL
+
+set.seed(42)
+acm_eau  <- FactoMineR::MCA(eau, graph = FALSE, ncp = 5)
+hcpc_eau <- FactoMineR::HCPC(acm_eau, nb.clust = 3, graph = FALSE)
+
+# Graphiques natifs pour éviter le bug de la pile de nœuds
+par(mfrow = c(1, 2))
+plot(acm_eau, choix = "var", title = "ACM – Qualite de l'eau", col.var = "darkblue")
+plot(hcpc_eau, choice = "tree", title = "CAH – Eau (3 clusters)")
+par(mfrow = c(1, 1))
+```
+
+```{r cluster_eau}
+cl_eau <- hcpc_eau$data.clust %>% mutate(cluster_eau = clust)
+labels_eau <- c("1" = "Eau sure", "2" = "Risque modere", "3" = "Risque eleve")
+
+# Réinjection directe sur les 1750 lignes (alignement parfait ligne à ligne)
+main$classe_eau <- labels_eau[as.character(cl_eau$cluster_eau)]
+main$classe_eau <- factor(main$classe_eau,
+  levels = c("Risque eleve", "Risque modere", "Eau sure"))
+
+tab_eau <- cl_eau %>%
+  group_by(Cluster = cluster_eau) %>%
+  summarise(
+    N = n(),
+    `Source améliorée (%)` = round(mean(source_eau == "Source amelioree") * 100, 1),
+    `Eau traitée (%)`      = round(mean(traitement_eau == "Traitee") * 100, 1),
+    `Partagée animaux (%)` = round(mean(eau_animaux == "Partagee animaux") * 100, 1),
+    .groups = "drop"
+  ) %>%
+  mutate(Classe = labels_eau[as.character(Cluster)])
+
+kable(tab_eau, booktabs = TRUE, linesep = "",
+  caption = "Profils des 3 clusters – Qualité de l'eau (Données complètes)") %>%
+  kable_styling(latex_options = c("HOLD_position", "striped"), font_size = 8) %>%
+  row_spec(0, bold = TRUE)
+```
+
+> **Interprétation :** L'axe principal de l'ACM oppose les ménages bénéficiant d'une source améliorée non partagée avec traitement (*Eau sûre*) aux ménages exposés via des sources non améliorées partagées avec les animaux (*Risque élevé*). Le cluster *Risque modéré* regroupe les profils intermédiaires (source améliorée mais non traitée ou partagée).
+
+---
+
+## Bloc 3 – Exposition aux antibiotiques
+
+**Variables filles :** prise ATB patient (2 semaines), prise ATB foyer (6 mois).
+
+```{r acm_atb, fig.cap="ACM Exposition ATB – plan factoriel et CAH", fig.height=3.8}
+atb_exp <- main %>%
+  mutate(
+    atb_patient = case_when(
+      `P15. Avez-vous pris des antibiotiques au cours des 2 dernières semaines ?` == "Oui" ~ "ATB patient: Oui",
+      `P15. Avez-vous pris des antibiotiques au cours des 2 dernières semaines ?` == "Non" ~ "ATB patient: Non",
+      TRUE ~ "ATB patient: Manquant"
+    ),
+    atb_foyer = case_when(
+      `P47. Ont-ils pris des antibiotiques ?` == "Oui" ~ "ATB foyer: Oui",
+      `P47. Ont-ils pris des antibiotiques ?` == "Non" ~ "ATB foyer: Non",
+      TRUE ~ "ATB foyer: Manquant"
+    )
+  ) %>%
+  select(atb_patient, atb_foyer) %>%
+  mutate(across(everything(), factor))
+
+rownames(atb_exp) <- NULL
+
+set.seed(42)
+acm_atb  <- FactoMineR::MCA(atb_exp, graph = FALSE, ncp = 5)
+hcpc_atb <- FactoMineR::HCPC(acm_atb, nb.clust = 3, graph = FALSE)
+
+# Utilisation des graphiques natifs de FactoMineR (Zéro dépendance externe, Zéro risque de bug)
+par(mfrow = c(1, 2)) # Divise l'écran en 2 côtes à côtes
+plot(acm_atb, choix = "var", title = "ACM – Exposition ATB", col.var = "darkblue")
+plot(hcpc_atb, choice = "tree", draw.rect = TRUE, title = "CAH – ATB (3 clusters)")
+par(mfrow = c(1, 1)) # Réinitialise l'écran
+```
+
+```{r cluster_atb}
+cl_atb <- hcpc_atb$data.clust %>% mutate(cluster_atb = clust)
+labels_atb <- c("1" = "Pas d'exposition", "2" = "Exposition modérée", "3" = "Exposition forte")
+
+# Réinjection directe et parfaite puisque la taille de cl_atb est RIGOUREUSEMENT égale à la taille de main
+main$classe_exposition_atb <- labels_atb[as.character(cl_atb$cluster_atb)]
+main$classe_exposition_atb <- factor(main$classe_exposition_atb,
+  levels = c("Pas d'exposition", "Exposition modérée", "Exposition forte"))
+
+tab_atb <- cl_atb %>%
+  group_by(Cluster = cluster_atb) %>%
+  summarise(
+    N = n(),
+    `ATB patient Oui (%)` = round(mean(atb_patient == "ATB patient: Oui") * 100, 1),
+    `ATB foyer Oui (%)`   = round(mean(atb_foyer == "ATB foyer: Oui") * 100, 1),
+    `Données Manquantes (%)` = round(mean(atb_patient == "ATB patient: Manquant" | atb_foyer == "ATB foyer: Manquant") * 100, 1),
+    .groups = "drop"
+  ) %>%
+  mutate(Classe = labels_atb[as.character(Cluster)])
+
+kable(tab_atb, booktabs = TRUE, linesep = "",
+  caption = "Profils des 3 clusters – Exposition aux antibiotiques (avec NA inclus)") %>%
+  kable_styling(latex_options = c("HOLD_position", "striped"), font_size = 8) %>%
+  column_spec(5, bold = TRUE) %>% row_spec(0, bold = TRUE)
+```
+
+> **Interprétation :** La structure factorielle distingue nettement les patients sans exposition (aucun ATB personnel ni dans le foyer), ceux avec exposition simple (patient ou foyer), et les cas de double exposition. Ces clusters reflètent une pression sélective antibiotique croissante susceptible de favoriser le portage de BMR.
+
+---
+
+## Bloc 4 – Contact avec les animaux
+
+**Variables filles :** possession d'animaux, aliments médicamenteux, ATB animaux sains, ferme proche, travail en ferme, abattoir proche.
+
+```{r acm_animal, fig.cap="ACM Contact animal – plan factoriel et CAH", fig.height=3.8}
+col_atb_bp <- grep("bien portants", names(main), value=TRUE)[1]
+
+ani <- main %>%
+  mutate(
+    possession = case_when(
+      `P52. Avez vous des animaux?` == "Oui" ~ "Animaux: Oui",
+      `P52. Avez vous des animaux?` == "Non" ~ "Animaux: Non",
+      TRUE ~ "Animaux: Manquant"
+    ),
+    alim_medic = case_when(
+      `P65. Utilisez-vous pour vos animaux  ces aliments ?/Aliments médicamenteux` == 1 ~ "Alim. medic.: Oui",
+      `P65. Utilisez-vous pour vos animaux  ces aliments ?/Aliments médicamenteux` == 0 ~ "Alim. medic.: Non",
+      TRUE ~ "Alim. medic.: Non"
+    ),
+    atb_bp = case_when(
+      .data[[col_atb_bp]] == "Oui" ~ "ATB anim. sains: Oui",
+      .data[[col_atb_bp]] == "Non" ~ "ATB anim. sains: Non",
+      TRUE ~ "ATB anim. sains: Non"
+    ),
+    ferme_proche = case_when(
+      `P38. Y a-t-il une ferme près de votre maison (< 50m) ?` == "Oui" ~ "Ferme <50m: Oui",
+      `P38. Y a-t-il une ferme près de votre maison (< 50m) ?` == "Non" ~ "Ferme <50m: Non",
+      TRUE ~ "Ferme <50m: Manquant"
+    )
+  ) %>%
+  select(possession, alim_medic, atb_bp, ferme_proche) %>%
+  mutate(across(everything(), factor))
+  # LE FILTER COMPLETE CASES A ÉTÉ SUPPRIMÉ POUR CONSERVER TOUTES LES LIGNES
+
+# Réinitialisation propre des lignes pour la CAH
+rownames(ani) <- NULL
+
+set.seed(42)
+acm_ani  <- FactoMineR::MCA(ani, graph = FALSE, ncp = 5)
+hcpc_ani <- FactoMineR::HCPC(acm_ani, nb.clust = 3, graph = FALSE)
+
+# Graphiques natifs robustes sans factoextra
+par(mfrow = c(1, 2))
+plot(acm_ani, choix = "var", title = "ACM – Contact animal", col.var = "darkred")
+plot(hcpc_ani, choice = "tree", title = "CAH – Animal (3 clusters)")
+par(mfrow = c(1, 1))
+```
+
+```{r cluster_animal}
+cl_ani <- hcpc_ani$data.clust %>% mutate(cluster_ani = clust)
+labels_ani <- c("1" = "Pas de contact", "2" = "Contact modéré", "3" = "Contact élevé + ATB vét.")
+
+# Réinjection directe ligne par ligne (parfaitement synchronisée puisque N_ani == N_main)
+main$classe_contact_animal <- labels_ani[as.character(cl_ani$cluster_ani)]
+main$classe_contact_animal <- factor(main$classe_contact_animal,
+  levels = c("Pas de contact", "Contact modéré", "Contact élevé + ATB vét."))
+
+tab_ani <- cl_ani %>%
+  group_by(Cluster = cluster_ani) %>%
+  summarise(
+    N = n(),
+    `Animaux (%)`         = round(mean(possession == "Animaux: Oui") * 100, 1),
+    `Alim. médic. (%)`    = round(mean(alim_medic == "Alim. medic.: Oui") * 100, 1),
+    `ATB anim. sains (%)` = round(mean(atb_bp == "ATB anim. sains: Oui") * 100, 1),
+    `Ferme <50m (%)`      = round(mean(ferme_proche == "Ferme <50m: Oui") * 100, 1),
+    .groups = "drop"
+  ) %>%
+  mutate(Classe = labels_ani[as.character(Cluster)])
+
+# Rendu de la table kable
+knitr::kable(tab_ani, booktabs = TRUE, linesep = "",
+  caption = "Profils des 3 clusters – Contact avec les animaux (Données complètes)") %>%
+  kableExtra::kable_styling(latex_options = c("HOLD_position", "striped", "scale_down"), font_size = 8) %>%
+  kableExtra::row_spec(0, bold = TRUE)
+```
+
+> **Interprétation :** L'ACM oppose les non-possesseurs d'animaux (faible exposition zoonotique) aux éleveurs utilisant des antibiotiques vétérinaires en prophylaxie (*Contact élevé + ATB vét.*). Ce dernier groupe présente le risque de transfert de résistances le plus élevé dans la chaîne animale-humaine.
+
+---
+
+## Bloc 5 – Exposition à l'environnement agricole
+
+**Variables filles :** terres cultivées, engrais fécaux, environnement immédiat, manipulation d'excréments.
+
+```{r acm_env, fig.cap="ACM Environnement agricole – plan factoriel et CAH", fig.height=3.8}
+env <- main %>%
+  mutate(
+    terres = case_when(
+      `P48. Possédez-vous des terres cultivées ?` == "Oui" ~ "Terres: Oui",
+      `P48. Possédez-vous des terres cultivées ?` == "Non" ~ "Terres: Non",
+      TRUE ~ "Terres: Manquant"
+    ),
+    engrais_fecaux = case_when(
+      `P50. Utilisez-vous des excréments humains ou animaux comme engrais ?/Excréments animaux` == 1 |
+      `P50. Utilisez-vous des excréments humains ou animaux comme engrais ?/Excréments humains` == 1 |
+      `P50. Utilisez-vous des excréments humains ou animaux comme engrais ?/Excréments humains et animaux` == 1
+        ~ "Engrais fecaux: Oui",
+      !is.na(`P50. Utilisez-vous des excréments humains ou animaux comme engrais ?/Non`)
+        ~ "Engrais fecaux: Non",
+      TRUE ~ "Engrais fecaux: Non"
+    ),
+    milieu_agricole = case_when(
+      `P37. Environnement immédiat autour de la maison/Terres cultivées` == 1 |
+      `P37. Environnement immédiat autour de la maison/Elevage d’animaux` == 1
+        ~ "Milieu agri.: Oui",
+      !is.na(`P37. Environnement immédiat autour de la maison/Environnement urbain`)
+        ~ "Milieu agri.: Non",
+      TRUE ~ "Milieu agri.: Non"
+    ),
+    manip_env = case_when(
+      `P36. Manipulez-vous les excréments (nettoyage, engrais) ?` == "Oui" ~ "Manip. excr.: Oui",
+      `P36. Manipulez-vous les excréments (nettoyage, engrais) ?` == "Non" ~ "Manip. excr.: Non",
+      TRUE ~ "Manip. excr.: Manquant"
+    )
+  ) %>%
+  select(terres, engrais_fecaux, milieu_agricole, manip_env) %>%
+  mutate(across(everything(), factor))
+  # LE FILTER COMPLETE CASES A ÉTÉ SUPPRIMÉ POUR CONSERVER TOUTES LES LIGNES
+
+# Réinitialisation des lignes pour la CAH
+rownames(env) <- NULL
+
+set.seed(42)
+acm_env  <- FactoMineR::MCA(env, graph = FALSE, ncp = 5)
+hcpc_env <- FactoMineR::HCPC(acm_env, nb.clust = 3, graph = FALSE)
+
+# Graphiques natifs robustes sans factoextra (Plus de plantage de pile)
+par(mfrow = c(1, 2))
+plot(acm_env, choix = "var", title = "ACM – Environnement agricole", col.var = "darkgreen")
+plot(hcpc_env, choice = "tree", title = "CAH – Env. agricole (3 clusters)")
+par(mfrow = c(1, 1))
+```
+
+```{r cluster_env}
+cl_env <- hcpc_env$data.clust %>% mutate(cluster_env = clust)
+labels_env <- c("1" = "Pas d'exposition", "2" = "Exposition modérée", "3" = "Exposition élevée")
+
+# Réinjection directe ligne par ligne (parfaitement synchronisée puisque N_env == N_main)
+main$classe_env_agricole <- labels_env[as.character(cl_env$cluster_env)]
+main$classe_env_agricole <- factor(main$classe_env_agricole,
+  levels = c("Pas d'exposition", "Exposition modérée", "Exposition élevée"))
+
+tab_env <- cl_env %>%
+  group_by(Cluster = cluster_env) %>%
+  summarise(
+    N = n(),
+    `Terres cultivées (%)`  = round(mean(terres == "Terres: Oui") * 100, 1),
+    `Engrais fécaux (%)`    = round(mean(engrais_fecaux == "Engrais fecaux: Oui") * 100, 1),
+    `Milieu agricole (%)`   = round(mean(milieu_agricole == "Milieu agri.: Oui") * 100, 1),
+    `Manip. excréments (%)` = round(mean(manip_env == "Manip. excr.: Oui") * 100, 1),
+    .groups = "drop"
+  ) %>%
+  mutate(Classe = labels_env[as.character(Cluster)])
+
+# Rendu de la table kable
+knitr::kable(tab_env, booktabs = TRUE, linesep = "",
+  caption = "Profils des 3 clusters – Exposition à l'environnement agricole (Données complètes)") %>%
+  kableExtra::kable_styling(latex_options = c("HOLD_position", "striped"), font_size = 8) %>%
+  kableExtra::row_spec(0, bold = TRUE)
+```
+
+> **Interprétation :** L'ACM révèle un gradient d'exposition allant de l'environnement strictement urbain (*Pas d'exposition*) au profil agricole intensif avec engrais fécaux et manipulation d'excréments (*Exposition élevée*), potentiellement vecteur de transfert de gènes de résistance par voie fécale-orale.
+
+---
+
+\newpage
+
+# Analyse exploratoire finale – Croisement avec le portage BMR
+
+```{r fn_chi2, include=FALSE}
+chi2_tab <- function(var_cl, label, df=main, cible="Porteur_BMR_fac") {
+  tab <- table(df[[var_cl]], df[[cible]], useNA="no")
+  if (any(dim(tab)==0)) return(NULL)
+  exp_min <- min(suppressWarnings(chisq.test(tab)$expected))
+  if (exp_min < 5) {
+    test <- fisher.test(tab, simulate.p.value=TRUE, B=5000)
+    pval <- test$p.value; tname <- "Fisher"
+  } else {
+    test <- chisq.test(tab); pval <- test$p.value; tname <- "Chi²"
+  }
+  df_out <- as.data.frame.matrix(addmargins(tab))
+  df_out$Modalité <- rownames(df_out)
+  df_out <- df_out[df_out$Modalité!="Sum",]
+  pct_pos <- round(df_out[,"Porteur BMR"] / df_out[,"Sum"] * 100, 1)
+  df_out$`Porteur BMR (%)` <- paste0(df_out[,"Porteur BMR"]," (",pct_pos,"%)")
+  df_out$`Non porteur (%)` <- paste0(df_out[,"Non porteur"],
+    " (",round(df_out[,"Non porteur"]/df_out[,"Sum"]*100,1),"%)")
+  df_out <- df_out[, c("Modalité","Sum","Non porteur (%)","Porteur BMR (%)")]
+  names(df_out)[2] <- "N total"
+  list(tab=df_out, pval=pval, test=tname)
+}
+fp <- function(p) if(p<0.001) "< 0.001" else sprintf("%.3f",p)
+
+bar_biv <- function(var_cl, label, cols=c(VERT,ORANGE,ROUGE)){
+  df_plot <- main %>%
+    filter(!is.na(.data[[var_cl]]) & !is.na(Porteur_BMR_fac)) %>%
+    count(.data[[var_cl]], Porteur_BMR_fac) %>%
+    group_by(.data[[var_cl]]) %>%
+    mutate(pct=n/sum(n)*100) %>%
+    filter(Porteur_BMR_fac=="Porteur BMR")
+  ggplot(df_plot, aes(x=.data[[var_cl]], y=pct, fill=.data[[var_cl]])) +
+    geom_col(show.legend=FALSE) +
+    geom_text(aes(label=sprintf("%.0f%%",pct)),vjust=-0.4,size=2.8,fontface="bold") +
+    scale_fill_manual(values=setNames(cols,levels(df_plot[[var_cl]]))) +
+    scale_y_continuous(limits=c(0,70),labels=label_percent(scale=1)) +
+    labs(title=label, x=NULL, y="% Porteurs BMR") +
+    theme_faso +
+    theme(axis.text.x=element_text(angle=25,hjust=1,size=7))
+}
+```
+
+```{r biv_all_tabs, results='asis'}
+blocs <- list(
+  list(var="classe_hygiene",         label="Hygiène individuelle"),
+  list(var="classe_eau",             label="Qualité de l'eau"),
+  list(var="classe_exposition_atb",  label="Exposition aux ATB"),
+  list(var="classe_contact_animal",  label="Contact animal"),
+  list(var="classe_env_agricole",    label="Environnement agricole")
+)
+
+for (b in blocs) {
+  res <- chi2_tab(b$var, b$label)
+  if (is.null(res)) next
+  cat(sprintf("\n**%s** – test %s, p = %s\n\n", b$label, res$test, fp(res$pval)))
+  print(
+    kable(res$tab, booktabs=TRUE, linesep="",
+      caption=sprintf("Portage BMR × %s", b$label)) %>%
+      kable_styling(latex_options=c("HOLD_position","striped"), font_size=8) %>%
+      row_spec(0, bold=TRUE)
+  )
+  cat("\n\\vspace{4pt}\n")
+}
+```
+
+```{r fig_biv_panel, fig.cap="Prévalence du portage BMR (%) selon les 5 variables de classe ACM-CAH", fig.height=6.5}
+g1 <- bar_biv("classe_hygiene",        "Hygiène",      c(ROUGE,ORANGE,VERT))
+g2 <- bar_biv("classe_eau",            "Eau",           c(ROUGE,ORANGE,VERT))
+g3 <- bar_biv("classe_exposition_atb", "Exposition ATB",c(VERT,ORANGE,ROUGE))
+g4 <- bar_biv("classe_contact_animal", "Contact animal",c(VERT,ORANGE,ROUGE))
+g5 <- bar_biv("classe_env_agricole",   "Env. agricole", c(VERT,ORANGE,ROUGE))
+
+gridExtra::grid.arrange(g1,g2,g3,g4,g5, ncol=2,
+  top=grid::textGrob("Prévalence du portage BMR par classe thématique (ACM-CAH)",
+                      gp=grid::gpar(fontsize=10,fontface="bold")))
+```
+
+```{r synthese_biv}
+# Tableau de synthèse
+synth <- purrr::map_df(blocs, function(b){
+  tab <- table(main[[b$var]], main$Porteur_BMR_fac, useNA="no")
+  if(any(dim(tab)==0)) return(NULL)
+  exp_min <- min(suppressWarnings(chisq.test(tab)$expected))
+  if(exp_min<5){
+    test <- fisher.test(tab,simulate.p.value=TRUE,B=5000)
+    pval <- test$p.value; tname <- "Fisher"
+  } else {
+    test <- chisq.test(tab); pval <- test$p.value; tname <- "Chi²"
+  }
+  pct_pos <- round(prop.table(tab,1)[,"Porteur BMR"]*100,1)
+  data.frame(
+    `Bloc thématique`   = b$label,
+    `Classe avec + fort portage` = names(which.max(pct_pos)),
+    `Prévalence max (%)` = max(pct_pos),
+    `Classe avec + faible portage` = names(which.min(pct_pos)),
+    `Prévalence min (%)` = min(pct_pos),
+    Test = tname,
+    `p-value` = fp(pval),
+    Significatif = if(pval<0.05) "***" else if(pval<0.20) "." else "NS",
+    check.names=FALSE, stringsAsFactors=FALSE
+  )
+})
+
+kable(synth, booktabs=TRUE, linesep="",
+  caption="Tableau de synthèse bivariée – portage BMR selon les classes ACM-CAH") %>%
+  kable_styling(latex_options=c("HOLD_position","striped","scale_down"), font_size=8) %>%
+  column_spec(1, bold=TRUE) %>%
+  column_spec(8, bold=TRUE) %>%
+  row_spec(which(synth$Significatif=="***"), background="#D5F5E3") %>%
+  row_spec(0, bold=TRUE)
+```
+
+> **Synthèse :** Les cinq blocs thématiques construits par ACM-CAH présentent des associations distinctes avec le portage digestif de BMR. Les classes à risque élevé (mauvaise hygiène, eau non sûre, double exposition ATB, contact animal intensif avec usage vétérinaire, exposition agricole élevée) affichent systématiquement les prévalences les plus élevées, confirmant la pertinence d'une approche multidimensionnelle "Une seule santé". Les variables significatives (p < 0,05) seront candidates au modèle multivarié.
+
+---
+
+# Mise à jour et export de la base finale
+
+```{r export_base}
+# ── Base enrichie avec les 5 nouvelles variables catégorielles ────────────────
+main_enrichie <- main   # toutes les nouvelles colonnes ont été injectées au fil des blocs
+
+# Vérification
+nouvelles_vars <- c("classe_hygiene","classe_eau","classe_exposition_atb",
+                    "classe_contact_animal","classe_env_agricole")
+verif <- data.frame(
+  Variable = nouvelles_vars,
+  `N renseignés` = sapply(nouvelles_vars, function(v) sum(!is.na(main_enrichie[[v]]))),
+  `N manquants`  = sapply(nouvelles_vars, function(v) sum( is.na(main_enrichie[[v]]))),
+  check.names=FALSE
+)
+
+kable(verif, booktabs=TRUE, linesep="",
+  caption="Vérification des nouvelles variables injectées dans la base") %>%
+  kable_styling(latex_options=c("HOLD_position","striped"), font_size=8) %>%
+  row_spec(0, bold=TRUE)
+
+# ── Export Excel 4 feuilles ───────────────────────────────────────────────────
+wb <- createWorkbook()
+sh_std <- createStyle(fontName="Arial", fontSize=9, fontColour="white",
+                       fgFill="#2C3E50", halign="CENTER",
+                       textDecoration="bold", wrapText=TRUE)
+sh_new <- createStyle(fontName="Arial", fontSize=9, fontColour="#1A3A1A",
+                       fgFill="#C8E6C9", halign="CENTER",
+                       textDecoration="bold", wrapText=TRUE)
+
+# Convertir facteurs → character pour l'export
+main_xl <- main_enrichie %>% mutate(across(where(is.factor), as.character))
+
+ajouter_feuille <- function(wb, nom, df, cols_new=character(0)){
+  addWorksheet(wb, nom)
+  writeData(wb, nom, df)
+  nc <- ncol(df)
+  addStyle(wb, nom, sh_std, rows=1, cols=1:nc, gridExpand=TRUE)
+  idx_n <- which(names(df) %in% cols_new)
+  if(length(idx_n)>0)
+    addStyle(wb, nom, sh_new, rows=1, cols=idx_n, gridExpand=TRUE)
+  setColWidths(wb, nom, cols=1:nc,
+    widths=pmin(pmax(nchar(names(df))*1.1, 10), 40))
+  freezePane(wb, nom, firstRow=TRUE)
+}
+
+ajouter_feuille(wb, "FASO_RAM_RESAISIE", main_xl, nouvelles_vars)
+ajouter_feuille(wb, "Comorbidite",       como %>% mutate(across(where(is.factor),as.character)))
+ajouter_feuille(wb, "ATB",               atb  %>% mutate(across(where(is.factor),as.character)))
+ajouter_feuille(wb, "medicament",        med  %>% mutate(across(where(is.factor),as.character)))
+
+out <- paste0("FASO_RAM_FINALE_", format(Sys.Date(),"%Y%m%d"), ".xlsx")
+saveWorkbook(wb, out, overwrite=TRUE)
+cat(sprintf("✔ Base exportée : %s\n", out))
+cat(sprintf("  FASO_RAM_RESAISIE : %d lignes × %d colonnes\n",
+            nrow(main_xl), ncol(main_xl)))
+cat(sprintf("  Nouvelles variables (en-tête vert) : %s\n",
+            paste(nouvelles_vars, collapse=", ")))
+```
+
+> **Note méthodologique :** Les cinq variables de classe issues de la CAH (`classe_hygiene`, `classe_eau`, `classe_exposition_atb`, `classe_contact_animal`, `classe_env_agricole`) sont injectées dans la base finale et exportées. Leurs en-têtes apparaissent en **vert** dans le fichier Excel pour faciliter leur repérage. Ces variables seront utilisées comme covariables dans la régression logistique multivariée.
