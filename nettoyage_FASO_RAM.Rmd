@@ -1,0 +1,839 @@
+---
+title: "Nettoyage de la Base de Données FASO RAM"
+subtitle: "Résistance aux antibiotiques à l'interface homme/animal/environnement – Burkina Faso"
+author: "GANAME Guemilatou"
+date: "`r format(Sys.time(), '%d %B %Y à %H:%M')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 5)
+
+pkgs <- c("readxl","dplyr","tidyr","stringr","knitr","kableExtra","openxlsx")
+invisible(lapply(pkgs, function(p){
+  if (!requireNamespace(p, quietly=TRUE))
+    install.packages(p, repos="https://cloud.r-project.org")
+  library(p, character.only=TRUE)
+}))
+
+FICHIER  <- "BDD_FASO_RAM_RESAISIE.xlsx"
+AGE_MIN  <- 0 ; AGE_MAX <- 120
+col_part <- "Identifiant participant"
+col_incl <- "Identifiant inclusion"
+ROUGE  <- "#C0392B" ; ORANGE <- "#E67E22"
+VERT   <- "#27AE60" ; BLEU   <- "#2980B9"
+
+# Chargement ──────────────────────────────────────────────────────────────────
+main_raw <- read_excel(FICHIER, sheet="FASO_RAM_RESAISIE", guess_max=2000)
+como_raw <- read_excel(FICHIER, sheet="Comorbidite")
+atb_raw  <- read_excel(FICHIER, sheet="ATB")
+med_raw  <- read_excel(FICHIER, sheet="medicament")
+main <- main_raw ; como <- como_raw ; atb <- atb_raw ; med <- med_raw
+
+# Journal ─────────────────────────────────────────────────────────────────────
+journal <- list()
+log_op <- function(feuille, id, variable, operation,
+                   valeur_avant="", valeur_apres="", motif="") {
+  for (i in seq_along(id))
+    journal[[length(journal)+1]] <<- data.frame(
+      Feuille=feuille, Identifiant=as.character(id[i]),
+      Variable=variable, Operation=operation,
+      Valeur_avant=as.character(valeur_avant[min(i,length(valeur_avant))]),
+      Valeur_apres=as.character(valeur_apres[min(i,length(valeur_apres))]),
+      Motif=motif, stringsAsFactors=FALSE)
+}
+
+# Fonction conversion date Excel ──────────────────────────────────────────────
+conv_date_xl <- function(x) {
+  sapply(x, function(v) {
+    if (is.na(v)) return(NA_character_)
+    if (inherits(v,"Date")||inherits(v,"POSIXct"))
+      return(format(as.Date(v),"%d/%m/%Y"))
+    n <- suppressWarnings(as.numeric(v))
+    if (!is.na(n) && n>=20000 && n<=60000) {
+      d <- tryCatch(as.Date(n, origin="1899-12-30"), error=function(e) NA)
+      if (!is.na(d)) return(format(d,"%d/%m/%Y"))
+    }
+    as.character(v)
+  }, USE.NAMES=FALSE)
+}
+
+appliquer_conv_dates <- function(df, feuille, cols) {
+  for (col in cols[cols %in% names(df)]) {
+    av <- as.character(df[[col]])
+    df[[col]] <- conv_date_xl(df[[col]])
+    ap <- as.character(df[[col]])
+    idx <- which(!is.na(av) & av!=ap)
+    if (length(idx)>0)
+      log_op(feuille,
+             if(col_part %in% names(df)) df[[col_part]][idx]
+             else if("_parent_index" %in% names(df))
+               as.character(df[["_parent_index"]][idx])
+             else as.character(idx),
+             col, "Conversion date Excel → JJ/MM/AAAA",
+             av[idx], ap[idx],
+             "Entier Excel converti en date lisible JJ/MM/AAAA")
+  }
+  df
+}
+```
+
+---
+
+# État initial de la base
+
+```{r etat_initial}
+tibble(
+  Feuille    = c("FASO_RAM_RESAISIE","Comorbidite","ATB","medicament"),
+  `N lignes` = c(nrow(main),nrow(como),nrow(atb),nrow(med)),
+  `N col.`   = c(ncol(main),ncol(como),ncol(atb),ncol(med))
+) %>%
+  kable(caption="Dimensions initiales", align="lrr") %>%
+  kable_styling(bootstrap_options=c("striped","hover"), full_width=FALSE) %>%
+  column_spec(1, bold=TRUE)
+```
+
+---
+
+# Opérations de nettoyage
+
+## Op. 1 – Conversion des dates (format Excel → JJ/MM/AAAA)
+
+```{r op_dates}
+cols_d_main <- c(
+  "P4. Date d\u2019inclusion dans l\u2019\u00e9tude (jj/mm/aaaa)",
+  "P5. Date d\u2019hospitalisation dans le site d\u2019\u00e9tude (jj/mm/aaaa) :",
+  "P6.1. Date de naissance",
+  "P69. Date et heure du pr\u00e9l\u00e8vement")
+cols_d_como <- c("P12. Date de debut","P14. Date de Fin")
+cols_d_med  <- c("P18. Date de d\u00e9but (jj/mm/aaaa)","P20. Date de fin (jj/mm/aaaa)")
+
+compte_xl <- function(df, cols) sum(sapply(
+  cols[cols %in% names(df)], function(col) {
+    v <- df[[col]]
+    n <- suppressWarnings(as.numeric(as.character(v)))
+    sum(!is.na(n) & n>=20000 & n<=60000, na.rm=TRUE)
+  }))
+
+n_main <- compte_xl(main, cols_d_main)
+n_como <- compte_xl(como, cols_d_como)
+n_med  <- compte_xl(med,  cols_d_med)
+
+main <- appliquer_conv_dates(main, "FASO_RAM_RESAISIE", cols_d_main)
+como <- appliquer_conv_dates(como, "Comorbidite",       cols_d_como)
+med  <- appliquer_conv_dates(med,  "medicament",         cols_d_med)
+
+tibble(
+  Feuille     = c("FASO_RAM_RESAISIE","Comorbidite","medicament","TOTAL"),
+  `Cellules converties` = c(n_main, n_como, n_med, n_main+n_como+n_med)
+) %>%
+  kable(caption="Conversions de dates (entier Excel → JJ/MM/AAAA)") %>%
+  kable_styling(bootstrap_options=c("striped","hover"), full_width=FALSE) %>%
+  row_spec(4, bold=TRUE)
+
+if (n_main+n_como+n_med==0)
+  cat("\u2714 Aucune date au format numérique Excel détectée.\n")
+```
+
+## Op. 2 – Suppression des colonnes entièrement vides
+
+```{r op_cols_vides}
+# Feuille principale
+cols_vides_main <- names(main)[sapply(main, function(x) all(is.na(x)))]
+cols_vides_como <- names(como)[sapply(como, function(x) all(is.na(x)))]
+cols_vides_atb  <- names(atb) [sapply(atb,  function(x) all(is.na(x)))]
+cols_vides_med  <- names(med) [sapply(med,  function(x) all(is.na(x)))]
+
+if (length(cols_vides_main)>0) {
+  log_op("FASO_RAM_RESAISIE","—",
+         paste(cols_vides_main, collapse=" | "),
+         "Suppression colonne entièrement vide","Vide","SUPPRIMÉE",
+         "Aucune valeur renseignée dans toute la colonne")
+  main <- main %>% select(-all_of(cols_vides_main))
+}
+if (length(cols_vides_como)>0) {
+  log_op("Comorbidite","—",paste(cols_vides_como,collapse=" | "),
+         "Suppression colonne entièrement vide","Vide","SUPPRIMÉE","Colonne vide")
+  como <- como %>% select(-all_of(cols_vides_como))
+}
+if (length(cols_vides_atb)>0) {
+  log_op("ATB","—",paste(cols_vides_atb,collapse=" | "),
+         "Suppression colonne entièrement vide","Vide","SUPPRIMÉE","Colonne vide")
+  atb <- atb %>% select(-all_of(cols_vides_atb))
+}
+if (length(cols_vides_med)>0) {
+  log_op("medicament","—",paste(cols_vides_med,collapse=" | "),
+         "Suppression colonne entièrement vide","Vide","SUPPRIMÉE","Colonne vide")
+  med <- med %>% select(-all_of(cols_vides_med))
+}
+
+tibble(
+  Feuille = c("FASO_RAM_RESAISIE","Comorbidite","ATB","medicament"),
+  `Colonnes supprimées` = c(
+    length(cols_vides_main), length(cols_vides_como),
+    length(cols_vides_atb),  length(cols_vides_med)),
+  `Colonnes restantes` = c(ncol(main),ncol(como),ncol(atb),ncol(med))
+) %>%
+  kable(caption="Suppression des colonnes entièrement vides") %>%
+  kable_styling(bootstrap_options=c("striped","hover"), full_width=FALSE)
+```
+
+## Op. 3 – FLAG Sexe invalide
+
+```{r op_sexe}
+val_att_sexe <- c("Homme","Femme")
+
+corriger_sexe <- function(x) {
+  s <- str_trim(str_to_lower(as.character(x)))
+  case_when(
+    s %in% c("masculin","m","homme","male","h","masc") ~ "Homme",
+    s %in% c("féminin","feminin","f","femme","female","fem","fém") ~ "Femme",
+    TRUE ~ NA_character_)
+}
+
+main <- main %>%
+  mutate(FLAG_SEXE_INVALIDE = case_when(
+    !is.na(`P6. Sexe`) & !`P6. Sexe` %in% val_att_sexe ~ corriger_sexe(`P6. Sexe`),
+    TRUE ~ NA_character_))
+
+lig_sexe    <- main %>% filter(!is.na(`P6. Sexe`) & !`P6. Sexe` %in% val_att_sexe)
+n_s         <- nrow(lig_sexe)
+n_s_deduit  <- sum(!is.na(lig_sexe$FLAG_SEXE_INVALIDE))
+n_s_na      <- n_s - n_s_deduit
+
+cat(sprintf("Lignes sexe invalide : %d  |  déduit : %d  |  NA (vérif. manuelle) : %d\n",
+            n_s, n_s_deduit, n_s_na))
+
+if (n_s>0) {
+  log_op("FASO_RAM_RESAISIE", lig_sexe[[col_part]], "P6. Sexe",
+         "Ajout FLAG_SEXE_INVALIDE (Homme/Femme ou NA)",
+         as.character(lig_sexe$`P6. Sexe`),
+         ifelse(is.na(lig_sexe$FLAG_SEXE_INVALIDE),
+                "NA – vérification manuelle",lig_sexe$FLAG_SEXE_INVALIDE),
+         "Valeur hors Homme/Femme")
+
+  lig_sexe %>%
+    select(all_of(col_part),`P6. Sexe`,FLAG_SEXE_INVALIDE,`P7. Age`) %>%
+    kable(caption="FLAG_SEXE_INVALIDE – valeur corrigée ou NA") %>%
+    kable_styling(bootstrap_options=c("striped","hover"), full_width=TRUE) %>%
+    row_spec(seq_len(n_s), background="#FFF9C4") %>%
+    column_spec(3, bold=TRUE, color=BLEU)
+} else cat("\u2714 Toutes les valeurs de sexe sont conformes.\n")
+```
+
+## Op. 4 – Cellule P7.Age → NA (âge aberrant)
+
+```{r op_age_aberrant}
+age_ab <- main %>% filter(!is.na(`P7. Age`) &
+                             (`P7. Age`<AGE_MIN | `P7. Age`>AGE_MAX))
+n_ab   <- nrow(age_ab)
+cat(sprintf("Âges aberrants → NA : %d cellule(s)\n", n_ab))
+
+if (n_ab>0) {
+  log_op("FASO_RAM_RESAISIE", age_ab[[col_part]], "P7. Age",
+         "Cellule → NA (âge aberrant)",
+         as.character(age_ab$`P7. Age`), "NA",
+         paste0("Âge hors [",AGE_MIN,"–",AGE_MAX,"] – cellule vidée, ligne conservée"))
+  age_ab %>%
+    select(all_of(col_part),`P7. Age`,`P6.1. Date de naissance`,`P6. Sexe`) %>%
+    kable(caption="Cellules P7.Age mises à NA") %>%
+    kable_styling(bootstrap_options=c("striped","hover"), full_width=FALSE) %>%
+    row_spec(seq_len(n_ab), color="white", background=ROUGE)
+  main <- main %>%
+    mutate(`P7. Age` = if_else(
+      !is.na(`P7. Age`) & (`P7. Age`<AGE_MIN | `P7. Age`>AGE_MAX),
+      NA_real_, `P7. Age`))
+  cat(sprintf("\u2714 %d cellule(s) vidée(s) – lignes conservées.\n", n_ab))
+} else cat("\u2714 Aucun âge aberrant.\n")
+```
+
+## Op. 5 – AGE_NETTOYE : imputation des âges manquants
+
+```{r op_age_nettoye}
+# ── Règle de construction ─────────────────────────────────────────────────────
+# AGE_NETTOYE est rempli sur TOUTES les lignes :
+#   1. P7.Age renseigné → AGE_NETTOYE = P7.Age
+#   2. P7.Age manquant ET Age_personne disponible → AGE_NETTOYE = Age_personne
+#   3. Les deux manquants (hors ligne environnement) → AGE_NETTOYE = moyenne
+#
+# Cas particulier : 1 ligne correspond à l'environnement (pas d'âge individuel)
+# → AGE_NETTOYE laissé à NA pour cette ligne.
+# La ligne environnement est identifiée par : P9.Profession == "Environnement"
+# (ajustez la condition ci-dessous si le libellé exact diffère).
+# ─────────────────────────────────────────────────────────────────────────────
+
+col_age_pers <- "Age_personne"
+
+if (col_age_pers %in% names(main)) {
+  main <- main %>%
+    mutate(
+      .p7  = suppressWarnings(as.numeric(as.character(`P7. Age`))),
+      .ap  = suppressWarnings(as.numeric(
+               str_extract(as.character(.data[[col_age_pers]]),"[0-9]+\\.?[0-9]*"))),
+      AGE_NETTOYE = case_when(
+        !is.na(.p7) ~ .p7,
+        !is.na(.ap) ~ .ap,
+        TRUE         ~ NA_real_)
+    ) %>% select(-.p7, -.ap)
+} else {
+  main <- main %>%
+    mutate(AGE_NETTOYE = suppressWarnings(as.numeric(as.character(`P7. Age`))))
+  cat("\u26a0 'Age_personne' absente – AGE_NETTOYE = P7.Age uniquement.\n")
+}
+
+# ── Lignes encore manquantes après étape 1+2 ─────────────────────────────────
+lignes_manq_age <- main %>% filter(is.na(AGE_NETTOYE))
+n_manq_total    <- nrow(lignes_manq_age)
+cat(sprintf("Âges encore manquants après P7.Age + Age_personne : %d\n",
+            n_manq_total))
+
+# ── Identification de la ligne environnement ──────────────────────────────────
+# Condition à ajuster si nécessaire selon les valeurs exactes de la base
+col_prof <- "P9. Profession"
+VAL_ENV  <- c("Environnement","environnement","ENV",
+               "Secteur environnement","ENVIRONNEMENT")
+
+if (col_prof %in% names(main)) {
+  idx_env <- which(is.na(main$AGE_NETTOYE) &
+                     str_trim(as.character(main[[col_prof]])) %in% VAL_ENV)
+} else {
+  idx_env <- integer(0)
+}
+
+n_env <- length(idx_env)
+cat(sprintf("  dont ligne(s) Environnement (pas d'âge) : %d  → AGE_NETTOYE = NA conservé\n",
+            n_env))
+
+# ── Lignes à imputer par la moyenne (tous les manquants sauf environnement) ───
+idx_imputer <- which(is.na(main$AGE_NETTOYE) & !seq_len(nrow(main)) %in% idx_env)
+n_imputer   <- length(idx_imputer)
+cat(sprintf("  dont à imputer par la moyenne           : %d\n\n", n_imputer))
+
+if (n_imputer > 0) {
+  # Moyenne calculée sur les valeurs valides de AGE_NETTOYE (hors NA)
+  moy_age <- round(mean(main$AGE_NETTOYE, na.rm=TRUE), 1)
+  cat(sprintf("Moyenne d'âge (calculée sur valeurs renseignées) : %.1f ans\n\n",
+              moy_age))
+
+  # Imputation
+  ids_imputes <- main[[col_part]][idx_imputer]
+  log_op("FASO_RAM_RESAISIE", ids_imputes, "AGE_NETTOYE",
+         "Imputation par la moyenne",
+         "NA",
+         as.character(rep(moy_age, n_imputer)),
+         paste0("Âge manquant (P7.Age et Age_personne absents) imputé par la moyenne : ",
+                moy_age, " ans"))
+
+  main$AGE_NETTOYE[idx_imputer] <- moy_age
+
+  tibble(
+    `Identifiant participant` = ids_imputes,
+    `AGE_NETTOYE imputé`      = moy_age
+  ) %>%
+    kable(caption=paste0("Lignes imputées par la moyenne (",
+                          moy_age," ans)")) %>%
+    kable_styling(bootstrap_options=c("striped","hover"), full_width=FALSE) %>%
+    row_spec(seq_len(n_imputer), background="#E6F1FB") %>%
+    column_spec(2, bold=TRUE, color=BLEU)
+}
+
+# ── Journal ligne environnement (AGE_NETTOYE = NA maintenu) ──────────────────
+if (n_env > 0) {
+  log_op("FASO_RAM_RESAISIE",
+         main[[col_part]][idx_env],
+         "AGE_NETTOYE",
+         "AGE_NETTOYE = NA conservé (ligne environnement)",
+         "NA", "NA",
+         "Ligne correspondant au secteur Environnement – pas d'âge individuel")
+}
+
+# ── Bilan final AGE_NETTOYE ───────────────────────────────────────────────────
+tibble(
+  Source = c("P7.Age (source principale)",
+             "Age_personne (complémentaire)",
+             "Imputation par la moyenne",
+             "NA conservé (ligne Environnement)",
+             "AGE_NETTOYE renseigné au total",
+             "AGE_NETTOYE encore NA"),
+  N = c(
+    sum(!is.na(main$`P7. Age`)),
+    if(col_age_pers %in% names(main))
+      sum(is.na(main$`P7. Age`) &
+            !is.na(suppressWarnings(as.numeric(
+              str_extract(as.character(main[[col_age_pers]]),"[0-9]+\\.?[0-9]*")))))
+    else 0,
+    n_imputer,
+    n_env,
+    sum(!is.na(main$AGE_NETTOYE)),
+    sum( is.na(main$AGE_NETTOYE))
+  )
+) %>%
+  kable(caption="Bilan AGE_NETTOYE – toutes lignes") %>%
+  kable_styling(bootstrap_options=c("striped","hover"), full_width=FALSE) %>%
+  row_spec(5, bold=TRUE, background="#D5F5E3") %>%
+  row_spec(6, background=if(sum(is.na(main$AGE_NETTOYE))>0) "#FADBD8" else "#D5F5E3")
+```
+
+## Op. 6 – Imputation Profession et Niveau d'éducation manquants
+
+```{r op_profession_education}
+col_prof_var <- "P9. Profession"
+col_educ_var <- "P8. Niveau d\u2019Education"
+
+# ── Profession : 2 valeurs manquantes ────────────────────────────────────────
+# Règle convenue :
+#   • La ligne dont le secteur d'intervention est "Environnement"
+#     → valeur maintenue à NA (pas de profession individuelle pour ce secteur)
+#   • L'autre ligne manquante → imputée par le MODE des professions
+
+if (col_prof_var %in% names(main)) {
+  idx_prof_manq <- which(is.na(main[[col_prof_var]]))
+  n_prof_manq   <- length(idx_prof_manq)
+  cat(sprintf("Professions manquantes : %d\n", n_prof_manq))
+
+  if (n_prof_manq > 0) {
+    # Séparer ligne environnement vs autre(s)
+    idx_prof_env   <- idx_prof_manq[idx_imputer %in% idx_env |
+                        (col_age_pers %in% names(main) &
+                           is.na(main$AGE_NETTOYE[idx_prof_manq]))]
+    # Plus robuste : si une seule ligne est déjà connue comme "env" (idx_env)
+    idx_prof_env2  <- idx_prof_manq[idx_prof_manq %in% idx_env]
+    idx_prof_autre <- setdiff(idx_prof_manq, idx_prof_env2)
+
+    # Mode
+    mode_prof <- names(sort(table(na.omit(main[[col_prof_var]])),
+                            decreasing=TRUE))[1]
+    cat(sprintf("  Mode profession : %s\n", mode_prof))
+
+    # Log ligne env
+    if (length(idx_prof_env2)>0) {
+      log_op("FASO_RAM_RESAISIE",
+             main[[col_part]][idx_prof_env2], col_prof_var,
+             "NA conservé (ligne Environnement)",
+             "NA","NA","Secteur Environnement – profession non applicable")
+      cat(sprintf("  Ligne(s) Environnement : NA conservé (%d)\n",
+                  length(idx_prof_env2)))
+    }
+
+    # Imputation par le mode
+    if (length(idx_prof_autre)>0) {
+      log_op("FASO_RAM_RESAISIE",
+             main[[col_part]][idx_prof_autre], col_prof_var,
+             "Imputation par le mode",
+             "NA", rep(mode_prof, length(idx_prof_autre)),
+             paste0("Profession manquante imputée par le mode : ", mode_prof))
+      main[[col_prof_var]][idx_prof_autre] <- mode_prof
+      cat(sprintf("  Ligne(s) imputées par le mode (%d) : '%s'\n",
+                  length(idx_prof_autre), mode_prof))
+    }
+  }
+} else cat("\u26a0 Colonne Profession absente.\n")
+
+# ── Niveau d'éducation : imputation par le mode ───────────────────────────────
+if (col_educ_var %in% names(main)) {
+  idx_educ_manq <- which(is.na(main[[col_educ_var]]))
+  n_educ_manq   <- length(idx_educ_manq)
+  cat(sprintf("\nNiveaux d'éducation manquants : %d\n", n_educ_manq))
+
+  if (n_educ_manq > 0) {
+    mode_educ <- names(sort(table(na.omit(main[[col_educ_var]])),
+                            decreasing=TRUE))[1]
+    cat(sprintf("  Mode éducation : %s\n", mode_educ))
+
+    log_op("FASO_RAM_RESAISIE",
+           main[[col_part]][idx_educ_manq], col_educ_var,
+           "Imputation par le mode",
+           "NA", rep(mode_educ, n_educ_manq),
+           paste0("Niveau d'éducation manquant imputé par le mode : ", mode_educ))
+
+    main[[col_educ_var]][idx_educ_manq] <- mode_educ
+    cat(sprintf("  \u2714 %d valeur(s) imputée(s) par le mode.\n", n_educ_manq))
+  } else {
+    cat("  \u2714 Aucune valeur manquante.\n")
+  }
+} else cat("\u26a0 Colonne Niveau d'éducation absente.\n")
+```
+
+## Op. 7 – FLAG doublons d'identifiant participant
+
+```{r op_doublons}
+# ── Stratégie ─────────────────────────────────────────────────────────────────
+# La colonne FLAG_DOUBLON est ajoutée.
+# Pour chaque identifiant dupliqué, la valeur indique DANS QUELLE COLONNE
+# se situe la discordance entre les lignes doubles :
+#   • Même _uuid sur toutes les lignes → "DOUBLON TECHNIQUE – _uuid identique"
+#   • _uuid différents → "DOUBLON SAISIE – _uuid différents" + liste des colonnes
+#     où les valeurs divergent entre les occurrences
+# Les lignes sans doublon reçoivent NA.
+
+# Trouver les identifiants dupliqués
+ids_dups <- main %>%
+  group_by(.data[[col_part]]) %>%
+  filter(n()>1) %>%
+  ungroup()
+
+n_dup_lignes <- nrow(ids_dups)
+
+if (n_dup_lignes > 0) {
+
+  # Pour chaque ID dupliqué, analyser les différences
+  type_dup <- ids_dups %>%
+    group_by(.data[[col_part]]) %>%
+    summarise(
+      N_uuid_dist = n_distinct(`_uuid`, na.rm=TRUE),
+      # Colonnes qui diffèrent (hors identifiants et flags)
+      Cols_discord = {
+  donnees_groupe <- pick(everything())   # anciennement cur_data()
+
+  cols_a_tester <- setdiff(
+    names(donnees_groupe),
+    c(col_part, col_incl, "_uuid","_index",
+      "_id","_submission_time",
+      grep("^FLAG", names(donnees_groupe), value=TRUE))
+  )
+
+  differentes <- cols_a_tester[
+    sapply(cols_a_tester, function(col) {
+      vals <- unique(na.omit(donnees_groupe[[col]]))
+      length(vals) > 1
+    })
+  ]
+
+  if (length(differentes) == 0) {
+    "aucune différence"
+  } else {
+    paste(differentes, collapse = " | ")
+  }
+},
+      .groups="drop"
+    ) %>%
+    mutate(
+      FLAG_val = case_when(
+        N_uuid_dist==1 ~ "DOUBLON TECHNIQUE – _uuid identique – colonnes discordantes : {cols}",
+        N_uuid_dist> 1 ~ "DOUBLON SAISIE – _uuid différents – colonnes discordantes : {cols}",
+        TRUE           ~ "DOUBLON – UUID manquant"
+      ),
+      FLAG_val = str_replace(FLAG_val, "\\{cols\\}", Cols_discord)
+    )
+
+  # Jointure dans main
+  main <- main %>%
+    left_join(type_dup %>% select(all_of(col_part), FLAG_val),
+              by=col_part) %>%
+    rename(FLAG_DOUBLON = FLAG_val)
+
+  # Journal
+  tech <- main %>% filter(!is.na(FLAG_DOUBLON) &
+                             grepl("TECHNIQUE", FLAG_DOUBLON))
+  sais <- main %>% filter(!is.na(FLAG_DOUBLON) &
+                             grepl("SAISIE", FLAG_DOUBLON))
+
+  if (nrow(tech)>0)
+    log_op("FASO_RAM_RESAISIE", unique(tech[[col_part]]),
+           "Identifiant participant", "Ajout FLAG_DOUBLON (technique)",
+           "—", "DOUBLON TECHNIQUE", "Même _uuid – soumission dupliquée")
+  if (nrow(sais)>0)
+    log_op("FASO_RAM_RESAISIE", unique(sais[[col_part]]),
+           "Identifiant participant", "Ajout FLAG_DOUBLON (saisie)",
+           "—", "DOUBLON SAISIE", "_uuid différents – à investiguer")
+
+  cat(sprintf("Lignes avec FLAG_DOUBLON : %d\n",
+              sum(!is.na(main$FLAG_DOUBLON))))
+  cat(sprintf("  DOUBLON TECHNIQUE : %d  |  DOUBLON SAISIE : %d\n",
+              nrow(tech), nrow(sais)))
+
+  main %>%
+    filter(!is.na(FLAG_DOUBLON)) %>%
+    select(all_of(col_part), `_uuid`, FLAG_DOUBLON) %>%
+    arrange(.data[[col_part]]) %>%
+    kable(caption="Lignes flaggées – FLAG_DOUBLON") %>%
+    kable_styling(bootstrap_options=c("striped","hover"), full_width=TRUE) %>%
+    row_spec(which(grepl("SAISIE",
+                         main %>% filter(!is.na(FLAG_DOUBLON)) %>%
+                           pull(FLAG_DOUBLON))),
+             color="white", background=ROUGE) %>%
+    row_spec(which(grepl("TECHNIQUE",
+                         main %>% filter(!is.na(FLAG_DOUBLON)) %>%
+                           pull(FLAG_DOUBLON))),
+             background="#FDEBD0") %>%
+    column_spec(3, width="38em")
+
+} else {
+  main <- main %>% mutate(FLAG_DOUBLON = NA_character_)
+  cat("\u2714 Aucun doublon d'identifiant détecté.\n")
+}
+```
+
+## Op. 8 – FLAG Identifiant inclusion (à supprimer)
+
+```{r op_id_incl}
+if (col_incl %in% names(main)) {
+  conc <- main %>%
+    mutate(ip=str_trim(as.character(.data[[col_part]])),
+           ii=str_trim(as.character(.data[[col_incl]])),
+           Et=case_when(is.na(ip)|is.na(ii)~"NA",
+                        ip==ii~"Concordant", TRUE~"Discordant"))
+  resume_c <- conc %>% count(Et, name="N")
+  n_discord <- sum(conc$Et=="Discordant", na.rm=TRUE)
+
+  resume_c %>%
+    kable(caption=paste0("Concordance '",col_part,"' vs '",col_incl,"'"),
+          col.names=c("Statut","N")) %>%
+    kable_styling(bootstrap_options=c("striped","hover"), full_width=FALSE) %>%
+    row_spec(which(resume_c$Et=="Discordant"), color="white", background=ROUGE) %>%
+    row_spec(which(resume_c$Et=="Concordant"), background="#D5F5E3")
+
+  main <- main %>%
+    mutate(FLAG_ID_INCL="À SUPPRIMER – colonne redondante avec 'Identifiant participant'")
+
+  log_op("FASO_RAM_RESAISIE","COLONNE ENTIÈRE",col_incl,
+         "FLAG_ID_INCL = 'À SUPPRIMER'",
+         "Présente","À SUPPRIMER",
+         paste0("Colonne redondante. Discordances : ", n_discord))
+
+  cat(sprintf("\u26a0 FLAG_ID_INCL posé. Colonne conservée, en-tête rouge dans l'Excel.\n"))
+  cat(sprintf("  Discordances entre les deux identifiants : %d\n", n_discord))
+} else {
+  main <- main %>% mutate(FLAG_ID_INCL=NA_character_)
+  cat(sprintf("\u26a0 Colonne '%s' absente.\n", col_incl))
+}
+```
+
+## Op. 9 – Valeurs inattendues → "Indeterminé" (feuille medicament)
+
+```{r op_med}
+val_att_med <- c("Sensible","Interm\u00e9diare","R\u00e9sistant","Indetermin\u00e9")
+
+cols_med_res <- names(med)[grepl(
+  "^P(79|80|81|82|83|84|85|86|87|88|89|90|91|92|93|94|95|96)\\.", names(med))]
+
+# Si pas trouvées via P79-P96, chercher colonnes contenant des modalités ATB
+if (length(cols_med_res)==0)
+  cols_med_res <- names(med)[sapply(names(med), function(col){
+    vals <- na.omit(unique(med[[col]]))
+    length(vals)>0 && any(vals %in% val_att_med) && any(!vals %in% val_att_med)
+  })]
+
+if (length(cols_med_res)>0) {
+  recap_av <- purrr::map_df(cols_med_res, function(col){
+    inat <- med[[col]][!is.na(med[[col]]) & !med[[col]] %in% val_att_med]
+    if (length(inat)>0)
+      data.frame(Colonne=col, N=length(inat),
+                 Valeurs=paste(unique(inat),collapse=", "),
+                 stringsAsFactors=FALSE)
+    else data.frame(Colonne=character(),N=integer(),Valeurs=character())
+  })
+
+  cat(sprintf("Cellules remplacées par 'Indeterminé' : %d\n", sum(recap_av$N)))
+
+  if (nrow(recap_av)>0) {
+    recap_av %>%
+      kable(caption="Valeurs inattendues medicament → 'Indeterminé'",
+            col.names=c("Colonne","N cellules","Valeurs remplacées")) %>%
+      kable_styling(bootstrap_options=c("striped","hover"), full_width=FALSE) %>%
+      row_spec(seq_len(nrow(recap_av)), background="#FDEBD0")
+
+    med <- med %>%
+      mutate(across(all_of(cols_med_res),
+                    ~if_else(!is.na(.) & !. %in% val_att_med,
+                             "Indetermin\u00e9", .)))
+
+    for (i in seq_len(nrow(recap_av)))
+      log_op("medicament",
+             paste0("N=",recap_av$N[i]," cellules dans ",recap_av$Colonne[i]),
+             recap_av$Colonne[i],
+             "Valeur inattendue \u2192 'Indetermin\u00e9'",
+             recap_av$Valeurs[i], "Indetermin\u00e9",
+             "Valeur hors modalités attendues du formulaire")
+
+    cat("\u2714 Remplacement effectué.\n")
+  }
+} else {
+  cat("\u2714 Aucune valeur inattendue dans medicament.\n")
+}
+```
+
+---
+
+# Bilan du nettoyage
+
+```{r bilan}
+cols_flag_ok <- c("FLAG_SEXE_INVALIDE","AGE_NETTOYE","FLAG_DOUBLON","FLAG_ID_INCL")
+cols_flag_ok <- cols_flag_ok[cols_flag_ok %in% names(main)]
+
+tibble(
+  Opération = c(
+    "Dates Excel converties (JJ/MM/AAAA)",
+    "Colonnes vides supprimées (toutes feuilles)",
+    "Cellules P7.Age → NA (âge aberrant)",
+    "AGE_NETTOYE : lignes renseignées",
+    "AGE_NETTOYE : imputées par la moyenne",
+    "AGE_NETTOYE : NA conservé (Environnement)",
+    "Professions imputées par le mode",
+    "Niveaux d'éducation imputés par le mode",
+    "FLAG_SEXE_INVALIDE posé",
+    "FLAG_DOUBLON posé",
+    "FLAG_ID_INCL posé",
+    "Cellules medicament → 'Indeterminé'"
+  ),
+  Valeur = c(
+    n_main + n_como + n_med,
+    length(cols_vides_main)+length(cols_vides_como)+
+      length(cols_vides_atb)+length(cols_vides_med),
+    n_ab,
+    sum(!is.na(main$AGE_NETTOYE)),
+    n_imputer,
+    n_env,
+    if(col_prof_var %in% names(main)) length(idx_prof_autre) else 0,
+    if(col_educ_var %in% names(main)) n_educ_manq else 0,
+    sum(!is.na(main$FLAG_SEXE_INVALIDE)),
+    sum(!is.na(main$FLAG_DOUBLON)),
+    sum(!is.na(main$FLAG_ID_INCL)),
+    if(exists("recap_av")) sum(recap_av$N) else 0
+  )
+) %>%
+  kable(caption="Bilan des opérations de nettoyage", align="lr") %>%
+  kable_styling(bootstrap_options=c("striped","hover"), full_width=FALSE) %>%
+  column_spec(1, bold=TRUE)
+
+cat(sprintf("\nFeuille FASO_RAM_RESAISIE : %d lignes | %d colonnes (final)\n",
+            nrow(main), ncol(main)))
+```
+
+---
+
+# Export – 4 feuilles nettoyées
+
+```{r export}
+# ══════════════════════════════════════════════════════════════════════════════
+# Ordre des colonnes FASO_RAM_RESAISIE :
+#   Identifiant participant | FLAG_SEXE_INVALIDE | AGE_NETTOYE |
+#   FLAG_DOUBLON | FLAG_ID_INCL | … reste dans l'ordre d'origine …
+# (dont "Identifiant inclusion" conservé avec en-tête rouge)
+#
+# Export : 4 feuilles UNIQUEMENT (pas de journal, pas de récapitulatif)
+# Mise en forme : en-têtes uniformes bleu foncé sur toutes les feuilles
+#   Seules les colonnes FLAG et AGE_NETTOYE ont une couleur distincte
+#   dans leur en-tête ET dans leurs cellules.
+#   Le reste de la feuille est sans mise en forme de fond.
+# ══════════════════════════════════════════════════════════════════════════════
+
+cols_tete <- c("FLAG_SEXE_INVALIDE","AGE_NETTOYE","FLAG_DOUBLON","FLAG_ID_INCL")
+cols_tete_ok <- cols_tete[cols_tete %in% names(main)]
+autres <- setdiff(names(main), c(col_part, cols_tete_ok))
+
+main_export <- main %>%
+  select(all_of(col_part), all_of(cols_tete_ok), all_of(autres))
+
+wb <- createWorkbook()
+
+# ── Styles Excel ──────────────────────────────────────────────────────────────
+wb <- createWorkbook()
+
+# Vos styles d'en-tête (CORRIGÉS ET HARMONISÉS)
+sh_bleu     <- createStyle(fontName="Arial", fontSize=11, fontColour="white", fgFill="#2C3E50", halign="CENTER", textDecoration="bold", border="Bottom", wrapText=TRUE)
+h_flag_hdr  <- createStyle(fontName="Arial", fontSize=11, fontColour="#854F0B", fgFill="#FFF9C4", halign="CENTER", textDecoration="bold", border="Bottom", wrapText=TRUE)
+h_age_hdr   <- createStyle(fontName="Arial", fontSize=11, fontColour="#185FA5", fgFill="#D6EAF8", halign="CENTER", textDecoration="bold", border="Bottom", wrapText=TRUE)
+h_incl_hdr  <- createStyle(fontName="Arial", fontSize=11, fontColour="white", fgFill="#C0392B", halign="CENTER", textDecoration="bold", border="Bottom", wrapText=TRUE)
+
+# --- MODIFICATION : Styles vides pour neutraliser la couleur de la base ---
+sh_flag_cell <- createStyle() 
+sh_age_cell  <- createStyle() 
+sh_rouge     <- createStyle() 
+
+# ── Feuille 1 : FASO_RAM_RESAISIE ────────────────────────────────────────────
+addWorksheet(wb, "FASO_RAM_RESAISIE")
+writeData(wb, "FASO_RAM_RESAISIE", main_export)
+
+# En-tête général : bleu foncé (Utilise maintenant sh_bleu pour correspondre à la suite)
+addStyle(wb, "FASO_RAM_RESAISIE", sh_bleu,
+         rows=1, cols=1:ncol(main_export), gridExpand=TRUE)
+
+# En-têtes FLAG : jaune
+idx_flags <- which(names(main_export) %in% c("FLAG_SEXE_INVALIDE","FLAG_ID_INCL"))
+if (length(idx_flags) > 0)
+  addStyle(wb, "FASO_RAM_RESAISIE", h_flag_hdr,
+           rows=1, cols=idx_flags, gridExpand=TRUE)
+
+# En-tête AGE_NETTOYE : bleu clair
+if ("AGE_NETTOYE" %in% names(main_export)) {
+  idx_age <- which(names(main_export) == "AGE_NETTOYE")
+  addStyle(wb, "FASO_RAM_RESAISIE", h_age_hdr, rows=1, cols=idx_age)
+  
+  # --- BLOQUÉ : Pas de couleur sur la colonne de données ---
+  # if (nrow(main_export) > 0)
+  #   addStyle(wb, "FASO_RAM_RESAISIE", sh_age_cell,
+  #            rows=2:(nrow(main_export)+1), cols=idx_age, gridExpand=TRUE)
+}
+
+# En-tête colonne "Identifiant inclusion" : rouge vif
+if (col_incl %in% names(main_export)) {
+  idx_incl <- which(names(main_export) == col_incl)
+  addStyle(wb, "FASO_RAM_RESAISIE", h_incl_hdr, rows=1, cols=idx_incl)
+}
+
+# Cellules FLAG_SEXE_INVALIDE non vides
+if ("FLAG_SEXE_INVALIDE" %in% names(main_export)) {
+  idx_fs    <- which(names(main_export) == "FLAG_SEXE_INVALIDE")
+  rows_sexe <- which(!is.na(main_export$FLAG_SEXE_INVALIDE)) + 1
+  if (length(rows_sexe) > 0) {
+    # --- BLOQUÉ : Pas de couleur sur la base ---
+    # addStyle(wb, "FASO_RAM_RESAISIE", sh_flag_cell,
+    #          rows=rows_sexe, cols=idx_fs, gridExpand=TRUE)
+    # addStyle(wb, "FASO_RAM_RESAISIE", sh_rouge,
+    #          rows=rows_sexe, cols=1:ncol(main_export), gridExpand=TRUE)
+  }
+}
+
+# Cellules FLAG_ID_INCL
+if ("FLAG_ID_INCL" %in% names(main_export) && nrow(main_export) > 0) {
+  idx_fi <- which(names(main_export) == "FLAG_ID_INCL")
+  # --- BLOQUÉ : Pas de couleur sur la base ---
+  # addStyle(wb, "FASO_RAM_RESAISIE", sh_flag_cell,
+  #          rows=2:(nrow(main_export)+1), cols=idx_fi, gridExpand=TRUE)
+}
+
+setColWidths(wb, "FASO_RAM_RESAISIE",
+             cols=1:ncol(main_export),
+             widths=pmin(pmax(nchar(names(main_export))*1.2, 12), 45))
+freezePane(wb, "FASO_RAM_RESAISIE", firstRow=TRUE, firstCol=TRUE)
+# ── Feuilles 2–4 : Comorbidite / ATB / medicament ────────────────────────────
+# ATB et Comorbidite sont inchangées. medicament contient les corrections.
+for (sh_name in c("Comorbidite", "ATB", "medicament")) {
+  df_sh <- switch(sh_name,
+                  Comorbidite = como,
+                  ATB         = atb,
+                  medicament  = med)
+  addWorksheet(wb, sh_name)
+  writeData(wb, sh_name, df_sh)
+  addStyle(wb, sh_name, sh_bleu,
+           rows=1, cols=1:ncol(df_sh), gridExpand=TRUE)
+  setColWidths(wb, sh_name, cols=1:ncol(df_sh),
+               widths=pmin(pmax(nchar(names(df_sh))*1.2, 10), 40))
+  freezePane(wb, sh_name, firstRow=TRUE)
+}
+
+
+# ── Sauvegarde ────────────────────────────────────────────────────────────────
+out <- paste0("FASO_RAM_NETTOYEE_", format(Sys.Date(),"%Y%m%d"), ".xlsx")
+saveWorkbook(wb, out, overwrite=TRUE)
+
+cat(sprintf("\u2714 Exporté : %s\n", out))
+cat(sprintf("  FASO_RAM_RESAISIE : %d lignes | %d colonnes\n",
+            nrow(main_export), ncol(main_export)))
+cat(sprintf("  Colonnes spéciales : %s\n", paste(cols_tete_ok, collapse=", ")))
+cat(sprintf("  '%s' : en-tête rouge\n", col_incl))
+cat(sprintf("  Comorbidite : %d l. | ATB : %d l. | medicament : %d l.\n",
+            nrow(como), nrow(atb), nrow(med)))
+```
+
+---
